@@ -13,6 +13,7 @@
 
 #include <linux/clk.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/regmap.h>
 
 #include <media/media-device.h>
@@ -180,6 +181,8 @@ struct rkcif_dvp {
 };
 
 struct rkcif_interface {
+	/* Shared MIPI interrupt register RMW from process and IRQ context. */
+	spinlock_t reg_lock;
 	enum rkcif_interface_type type;
 	enum rkcif_interface_status status;
 	enum rkcif_interface_index index;
@@ -232,6 +235,7 @@ struct rkcif_match_data {
 
 struct rkcif_device {
 	struct device *dev;
+	int irq;
 
 	const struct rkcif_match_data *match_data;
 	struct clk_bulk_data clks[RKCIF_CLK_MAX];

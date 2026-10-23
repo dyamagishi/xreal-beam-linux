@@ -186,6 +186,7 @@ static int rkcif_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
+	rkcif->irq = irq;
 	ret = devm_request_irq(dev, irq, rkcif_isr, IRQF_SHARED,
 			       dev_driver_string(dev), dev);
 	if (ret)

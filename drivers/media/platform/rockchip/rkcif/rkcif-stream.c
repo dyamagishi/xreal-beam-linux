@@ -7,6 +7,7 @@
  */
 
 #include <linux/pm_runtime.h>
+#include <linux/interrupt.h>
 
 #include <media/v4l2-common.h>
 #include <media/v4l2-fwnode.h>
@@ -308,21 +309,23 @@ static void rkcif_stream_stop_streaming(struct vb2_queue *queue)
 	u64 mask;
 	int ret;
 
-	mask = BIT_ULL(stream->id);
-	v4l2_subdev_disable_streams(&stream->interface->sd, RKCIF_IF_PAD_SRC,
-				    mask);
-
-	stream->stopping = true;
-	ret = wait_event_timeout(stream->wq_stopped, !stream->stopping,
+	/* Finish the receiver before stopping its upstream clock/data source. */
+	WRITE_ONCE(stream->stopping, true);
+	ret = wait_event_timeout(stream->wq_stopped,
+				 !READ_ONCE(stream->stopping),
 				 msecs_to_jiffies(1000));
-
 	if (!ret && stream->stop_streaming)
 		stream->stop_streaming(stream);
 
+	/* Drain any handler before upstream power-down or buffer release. */
+	synchronize_irq(rkcif->irq);
+
+	mask = BIT_ULL(stream->id);
+	v4l2_subdev_disable_streams(&stream->interface->sd, RKCIF_IF_PAD_SRC,
+				    mask);
 	pm_runtime_put(rkcif->dev);
 
 	rkcif_stream_return_all_buffers(stream, VB2_BUF_STATE_ERROR);
-
 	video_device_pipeline_stop(&stream->vdev);
 }
 

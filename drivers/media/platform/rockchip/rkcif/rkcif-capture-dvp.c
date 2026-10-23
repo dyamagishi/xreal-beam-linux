@@ -730,7 +730,7 @@ static void rkcif_dvp_stop_streaming(struct rkcif_stream *stream)
 	rkcif_dvp_write(rkcif, RKCIF_DVP_INTSTAT, 0x3ff);
 	rkcif_dvp_write(rkcif, RKCIF_DVP_FRAME_STATUS, 0x0);
 
-	stream->stopping = false;
+	WRITE_ONCE(stream->stopping, false);
 }
 
 static void rkcif_dvp_reset_stream(struct rkcif_device *rkcif)
@@ -774,7 +774,7 @@ irqreturn_t rkcif_dvp_isr(int irq, void *ctx)
 
 		stream = &rkcif->interfaces[RKCIF_DVP].streams[RKCIF_ID0];
 
-		if (stream->stopping) {
+		if (READ_ONCE(stream->stopping)) {
 			rkcif_dvp_stop_streaming(stream);
 			wake_up(&stream->wq_stopped);
 			ret = IRQ_HANDLED;

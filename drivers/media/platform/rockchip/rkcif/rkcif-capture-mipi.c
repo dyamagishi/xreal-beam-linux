@@ -724,6 +724,7 @@ static int rkcif_mipi_start_streaming(struct rkcif_stream *stream)
 	struct v4l2_subdev_state *state;
 	u32 ctrl0 = 0, ctrl1 = 0, int_temp = 0, int_mask = 0, vlw = 0;
 	u16 height, width;
+	unsigned long flags;
 	int ret = -EINVAL;
 
 	state = v4l2_subdev_lock_and_get_active_state(&interface->sd);
@@ -752,6 +753,7 @@ static int rkcif_mipi_start_streaming(struct rkcif_stream *stream)
 	int_mask |= RKCIF_MIPI_INT_FRAME0_END(stream->id);
 	int_mask |= RKCIF_MIPI_INT_FRAME1_END(stream->id);
 
+	spin_lock_irqsave(&interface->reg_lock, flags);
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTEN);
 	int_temp |= int_mask;
 	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp);
@@ -759,6 +761,7 @@ static int rkcif_mipi_start_streaming(struct rkcif_stream *stream)
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTSTAT);
 	int_temp &= ~int_mask;
 	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_temp);
+	spin_unlock_irqrestore(&interface->reg_lock, flags);
 
 	rkcif_mipi_stream_write(stream, RKCIF_MIPI_FRAME0_VLW_Y, vlw);
 	rkcif_mipi_stream_write(stream, RKCIF_MIPI_FRAME1_VLW_Y, vlw);
@@ -785,27 +788,22 @@ out:
 static void rkcif_mipi_stop_streaming(struct rkcif_stream *stream)
 {
 	struct rkcif_interface *interface = stream->interface;
-	struct v4l2_subdev_state *state;
-	u32 int_temp = 0, int_mask = 0;
+	unsigned long flags;
+	u32 int_temp, int_mask;
 
-	state = v4l2_subdev_lock_and_get_active_state(&interface->sd);
-
+	/* This callback also runs in the frame-end hard IRQ handler. */
+	spin_lock_irqsave(&interface->reg_lock, flags);
 	rkcif_mipi_stream_write(stream, RKCIF_MIPI_CTRL0, 0);
 
-	int_mask |= RKCIF_MIPI_INT_FRAME0_END(stream->id);
-	int_mask |= RKCIF_MIPI_INT_FRAME1_END(stream->id);
-
+	int_mask = RKCIF_MIPI_INT_FRAME0_END(stream->id) |
+		   RKCIF_MIPI_INT_FRAME1_END(stream->id);
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTEN);
-	int_temp &= ~int_mask;
-	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp);
-
+	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp & ~int_mask);
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTSTAT);
-	int_temp &= ~int_mask;
-	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_temp);
+	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_temp & ~int_mask);
 
-	stream->stopping = false;
-
-	v4l2_subdev_unlock_state(state);
+	WRITE_ONCE(stream->stopping, false);
+	spin_unlock_irqrestore(&interface->reg_lock, flags);
 }
 
 static void rkcif_mipi_set_crop(struct rkcif_stream *stream, u16 left, u16 top)
@@ -837,7 +835,7 @@ irqreturn_t rkcif_mipi_isr(int irq, void *ctx)
 			    intstat & RKCIF_MIPI_INT_FRAME1_END(stream->id)) {
 				ret = IRQ_HANDLED;
 
-				if (stream->stopping) {
+				if (READ_ONCE(stream->stopping)) {
 					rkcif_mipi_stop_streaming(stream);
 					wake_up(&stream->wq_stopped);
 					continue;
@@ -863,6 +861,7 @@ int rkcif_mipi_register(struct rkcif_device *rkcif)
 		struct rkcif_interface *interface = &rkcif->interfaces[index];
 
 		interface->index = index;
+		spin_lock_init(&interface->reg_lock);
 		interface->type = RKCIF_IF_MIPI;
 		interface->in_fmts = mipi_in_fmts;
 		interface->in_fmts_num = ARRAY_SIZE(mipi_in_fmts);
