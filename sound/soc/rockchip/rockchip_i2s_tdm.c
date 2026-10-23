@@ -243,6 +243,31 @@ static void rockchip_snd_xfer_clear(struct rk_i2s_tdm_dev *i2s_tdm,
 		regmap_read(i2s_tdm->regmap, I2S_CLR, &val);
 		retry--;
 		if (!retry) {
+			/* An external I2S source can stop BCLK before STOP.
+			 * RK3568 then leaves FIFO clear pending; the MCLK-only
+			 * reset below does not clear its HCLK-domain request.
+			 * Use the downstream FIFO-clear sequence, restoring slave
+			 * mode before returning. No transfer is running here.
+			 */
+			if (!i2s_tdm->is_master_mode &&
+			    of_device_is_compatible(i2s_tdm->dev->of_node,
+					    "rockchip,rk3568-i2s-tdm")) {
+				int ret;
+
+				regmap_update_bits(i2s_tdm->regmap, I2S_CKR,
+					I2S_CKR_MSS_MASK, I2S_CKR_MSS_MASTER);
+				regmap_update_bits(i2s_tdm->regmap, I2S_CLR,
+					clr, clr);
+				ret = regmap_read_poll_timeout_atomic(i2s_tdm->regmap,
+					I2S_CLR, val, !(val & clr), 10, 100);
+				regmap_update_bits(i2s_tdm->regmap, I2S_CKR,
+					I2S_CKR_MSS_MASK, I2S_CKR_MSS_SLAVE);
+				if (!ret) {
+					dev_dbg(i2s_tdm->dev,
+						"FIFO clear recovered without external BCLK\n");
+					break;
+				}
+			}
 			dev_warn(i2s_tdm->dev, "clear failed, reset %s%s\n",
 				 tx ? "tx" : "", rx ? "rx" : "");
 			if (rx && tx)
