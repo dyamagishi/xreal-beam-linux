@@ -755,12 +755,23 @@ irqreturn_t rkcif_dvp_isr(int irq, void *ctx)
 {
 	struct device *dev = ctx;
 	struct rkcif_device *rkcif = dev_get_drvdata(dev);
+	struct rkcif_interface *interface = &rkcif->interfaces[RKCIF_DVP];
 	struct rkcif_stream *stream;
 	u32 intstat, lastline, lastpix, cif_frmst;
 	irqreturn_t ret = IRQ_NONE;
 
 	if (!rkcif->match_data->dvp)
 		return ret;
+
+	/* No endpoint means no registered stream and no valid ping-pong buffers. */
+	if (READ_ONCE(interface->status) != RKCIF_IF_ACTIVE ||
+	    !READ_ONCE(interface->streams_num)) {
+		atomic64_inc(&rkcif->inactive_dvp_irqs);
+		return IRQ_NONE;
+	}
+	if (!(rkcif_dvp_read(rkcif, RKCIF_DVP_INTEN) &
+	      (RKCIF_INTEN_FRAME_END_EN | RKCIF_INTEN_PST_INF_FRAME_END_EN)))
+		return IRQ_NONE;
 
 	intstat = rkcif_dvp_read(rkcif, RKCIF_DVP_INTSTAT);
 	cif_frmst = rkcif_dvp_read(rkcif, RKCIF_DVP_FRAME_STATUS);

@@ -754,13 +754,10 @@ static int rkcif_mipi_start_streaming(struct rkcif_stream *stream)
 	int_mask |= RKCIF_MIPI_INT_FRAME1_END(stream->id);
 
 	spin_lock_irqsave(&interface->reg_lock, flags);
+	/* W1C: clear this stream's pending ends before enabling its IRQs. */
+	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_mask);
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTEN);
-	int_temp |= int_mask;
-	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp);
-
-	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTSTAT);
-	int_temp &= ~int_mask;
-	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_temp);
+	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp | int_mask);
 	spin_unlock_irqrestore(&interface->reg_lock, flags);
 
 	rkcif_mipi_stream_write(stream, RKCIF_MIPI_FRAME0_VLW_Y, vlw);
@@ -799,8 +796,7 @@ static void rkcif_mipi_stop_streaming(struct rkcif_stream *stream)
 		   RKCIF_MIPI_INT_FRAME1_END(stream->id);
 	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTEN);
 	rkcif_mipi_write(interface, RKCIF_MIPI_INTEN, int_temp & ~int_mask);
-	int_temp = rkcif_mipi_read(interface, RKCIF_MIPI_INTSTAT);
-	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_temp & ~int_mask);
+	rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, int_mask);
 
 	WRITE_ONCE(stream->stopping, false);
 	spin_unlock_irqrestore(&interface->reg_lock, flags);
@@ -819,14 +815,24 @@ irqreturn_t rkcif_mipi_isr(int irq, void *ctx)
 	struct device *dev = ctx;
 	struct rkcif_device *rkcif = dev_get_drvdata(dev);
 	irqreturn_t ret = IRQ_NONE;
-	u32 intstat;
+	u32 intstat, inten;
 
 	for (unsigned int i = 0; i < rkcif->match_data->mipi->mipi_num; i++) {
 		enum rkcif_interface_index index = RKCIF_MIPI_BASE + i;
 		struct rkcif_interface *interface = &rkcif->interfaces[index];
 
+		if (READ_ONCE(interface->status) != RKCIF_IF_ACTIVE ||
+		    !READ_ONCE(interface->streams_num))
+			continue;
 		intstat = rkcif_mipi_read(interface, RKCIF_MIPI_INTSTAT);
+		inten = rkcif_mipi_read(interface, RKCIF_MIPI_INTEN);
 		rkcif_mipi_write(interface, RKCIF_MIPI_INTSTAT, intstat);
+		if (intstat)
+			ret = IRQ_HANDLED;
+		if ((intstat & ~inten) & GENMASK(15, 8))
+			atomic64_inc(&rkcif->masked_mipi_irqs);
+		/* Latched but disabled stream events must not complete freed buffers. */
+		intstat &= inten;
 
 		for (unsigned int j = 0; j < interface->streams_num; j++) {
 			struct rkcif_stream *stream = &interface->streams[j];

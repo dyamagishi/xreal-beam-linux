@@ -12,6 +12,7 @@
 #define _RKCIF_COMMON_H
 
 #include <linux/clk.h>
+#include <linux/atomic.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/regmap.h>
@@ -236,6 +237,12 @@ struct rkcif_match_data {
 struct rkcif_device {
 	struct device *dev;
 	int irq;
+	bool irq_enabled;
+	atomic64_t irq_count;
+	atomic64_t inactive_hw_irqs;
+	atomic64_t inactive_dvp_irqs;
+	atomic64_t masked_mipi_irqs;
+	atomic64_t bad_buffers;
 
 	const struct rkcif_match_data *match_data;
 	struct clk_bulk_data clks[RKCIF_CLK_MAX];

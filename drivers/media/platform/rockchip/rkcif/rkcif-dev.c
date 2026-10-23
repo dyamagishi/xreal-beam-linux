@@ -12,12 +12,14 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
+#include <linux/sysfs.h>
 #include <linux/reset.h>
 
 #include <media/v4l2-fwnode.h>
@@ -150,16 +152,49 @@ static const struct v4l2_async_notifier_operations rkcif_notifier_ops = {
 
 static irqreturn_t rkcif_isr(int irq, void *ctx)
 {
+	struct device *dev = ctx;
+	struct rkcif_device *rkcif = dev_get_drvdata(dev);
 	irqreturn_t ret = IRQ_NONE;
 
+	atomic64_inc(&rkcif->irq_count);
+	/* Access registers only while clocks and the controller IRQ are ready. */
+	if (!smp_load_acquire(&rkcif->irq_enabled)) {
+		atomic64_inc(&rkcif->inactive_hw_irqs);
+		return IRQ_NONE;
+	}
 	if (rkcif_dvp_isr(irq, ctx) == IRQ_HANDLED)
 		ret = IRQ_HANDLED;
-
 	if (rkcif_mipi_isr(irq, ctx) == IRQ_HANDLED)
 		ret = IRQ_HANDLED;
-
 	return ret;
 }
+
+static ssize_t beam_irq_counts_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct rkcif_device *rkcif = dev_get_drvdata(dev);
+	struct rkcif_interface *dvp = &rkcif->interfaces[RKCIF_DVP];
+	struct irq_data *data = irq_get_irq_data(rkcif->irq);
+
+	return sysfs_emit(buf,
+		"irq=%lld inactive_hw=%lld inactive_dvp=%lld masked_mipi=%lld bad_buffers=%lld dvp_status=%u dvp_streams=%u irq_on=%u core_disabled=%u\n",
+		(long long)atomic64_read(&rkcif->irq_count),
+		(long long)atomic64_read(&rkcif->inactive_hw_irqs),
+		(long long)atomic64_read(&rkcif->inactive_dvp_irqs),
+		(long long)atomic64_read(&rkcif->masked_mipi_irqs),
+		(long long)atomic64_read(&rkcif->bad_buffers),
+		READ_ONCE(dvp->status), READ_ONCE(dvp->streams_num),
+		smp_load_acquire(&rkcif->irq_enabled),
+		data ? irqd_irq_disabled(data) : true);
+}
+static DEVICE_ATTR_RO(beam_irq_counts);
+static struct attribute *rkcif_beam_attrs[] = {
+	&dev_attr_beam_irq_counts.attr,
+	NULL,
+};
+static const struct attribute_group rkcif_beam_group = {
+	.attrs = rkcif_beam_attrs,
+};
 
 static int rkcif_probe(struct platform_device *pdev)
 {
@@ -177,6 +212,11 @@ static int rkcif_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(dev, rkcif);
 	rkcif->dev = dev;
+	atomic64_set(&rkcif->irq_count, 0);
+	atomic64_set(&rkcif->inactive_hw_irqs, 0);
+	atomic64_set(&rkcif->inactive_dvp_irqs, 0);
+	atomic64_set(&rkcif->masked_mipi_irqs, 0);
+	atomic64_set(&rkcif->bad_buffers, 0);
 
 	rkcif->base_addr = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(rkcif->base_addr))
@@ -187,7 +227,7 @@ static int rkcif_probe(struct platform_device *pdev)
 		return irq;
 
 	rkcif->irq = irq;
-	ret = devm_request_irq(dev, irq, rkcif_isr, IRQF_SHARED,
+	ret = devm_request_irq(dev, irq, rkcif_isr, IRQF_NO_AUTOEN,
 			       dev_driver_string(dev), dev);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request irq\n");
@@ -238,6 +278,10 @@ static int rkcif_probe(struct platform_device *pdev)
 		goto err_notifier_cleanup;
 	}
 
+	ret = devm_device_add_group(dev, &rkcif_beam_group);
+	if (ret)
+		goto err_rkcif_unregister;
+
 	ret = v4l2_async_nf_register(&rkcif->notifier);
 	if (ret)
 		goto err_rkcif_unregister;
@@ -257,10 +301,19 @@ err_media_dev_cleanup:
 	return ret;
 }
 
+static void rkcif_irq_disable(struct rkcif_device *rkcif)
+{
+	if (READ_ONCE(rkcif->irq_enabled)) {
+		smp_store_release(&rkcif->irq_enabled, false);
+		disable_irq(rkcif->irq);
+	}
+}
+
 static void rkcif_remove(struct platform_device *pdev)
 {
 	struct rkcif_device *rkcif = platform_get_drvdata(pdev);
 
+	rkcif_irq_disable(rkcif);
 	v4l2_async_nf_unregister(&rkcif->notifier);
 	rkcif_unregister(rkcif);
 	v4l2_async_nf_cleanup(&rkcif->notifier);
@@ -273,6 +326,9 @@ static void rkcif_remove(struct platform_device *pdev)
 static int rkcif_runtime_suspend(struct device *dev)
 {
 	struct rkcif_device *rkcif = dev_get_drvdata(dev);
+
+	/* Mask and drain the dedicated controller IRQ before reset/clock gating. */
+	rkcif_irq_disable(rkcif);
 
 	/*
 	 * Reset CIF (CRU, DMA, FIFOs) to allow a clean resume.
@@ -299,6 +355,11 @@ static int rkcif_runtime_resume(struct device *dev)
 		return ret;
 	}
 
+	/* The register bank is accessible before the IRQ can run. */
+	if (!READ_ONCE(rkcif->irq_enabled)) {
+		smp_store_release(&rkcif->irq_enabled, true);
+		enable_irq(rkcif->irq);
+	}
 	return 0;
 }
 

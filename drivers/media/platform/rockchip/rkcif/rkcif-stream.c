@@ -82,7 +82,23 @@ void rkcif_stream_pingpong(struct rkcif_stream *stream)
 {
 	struct rkcif_buffer *buffer;
 
+	if (unlikely(stream->frame_phase < 0 || stream->frame_phase > 1)) {
+		if (stream->rkcif)
+			atomic64_inc(&stream->rkcif->bad_buffers);
+		pr_err_ratelimited("BEAM_BAD_BUFFER invalid phase=%d caller=%pS\n",
+				   stream->frame_phase, (void *)_RET_IP_);
+		return;
+	}
 	buffer = stream->buffers[stream->frame_phase];
+	if (unlikely(!buffer)) {
+		if (stream->rkcif)
+			atomic64_inc(&stream->rkcif->bad_buffers);
+		pr_err_ratelimited("BEAM_BAD_BUFFER NULL interface=%u id=%u phase=%d stopping=%d caller=%pS\n",
+				   stream->interface ? stream->interface->index : ~0U,
+				   stream->id, stream->frame_phase,
+				   READ_ONCE(stream->stopping), (void *)_RET_IP_);
+		return;
+	}
 	if (!buffer->is_dummy)
 		rkcif_stream_complete_buffer(stream, buffer);
 
