@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * 初代BeamのLinux 7.3 bring-up用。起動・実機検証前の構成。
+ * SoC識別は実機の純正DTに従う。RK3566との最終識別は未完了。
+ * 電源/PD/充電/ファン/映像の移植が終わるまで常用しない。
+ */
+/dts-v1/;
+#include "rk3568.dtsi"
+
+/ {
+	model = "XREAL Beam (mainline bring-up)";
+	compatible = "xreal,beam", "rockchip,rk3568";
+
+	aliases {
+		/* 現行initのmmcblk2依存を追跡できるよう既存番号を保つ。 */
+		mmc2 = &sdhci;
+	};
+
+	chosen: chosen {
+		/* 純正FIQ debuggerが使用するUART2。USBシリアルとは別。 */
+		stdout-path = "serial2:1500000n8";
+	};
+
+	/* memory/regは固定せず、実機bootloaderからの設定を検証する。 */
+};
+
+/* CPU電源とOPPを照合するまで周波数・電圧を変更しない。 */
+&cpu0 { /delete-property/ operating-points-v2; };
+&cpu1 { /delete-property/ operating-points-v2; };
+&cpu2 { /delete-property/ operating-points-v2; };
+&cpu3 { /delete-property/ operating-points-v2; };
+
+/* 純正DTで8bit/non-removable。初回はHS200/HS400を有効にしない。 */
+&sdhci {
+	bus-width = <8>;
+	max-frequency = <52000000>;
+	non-removable;
+	status = "okay";
+};
+
+&uart2 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	status = "okay";
+};
+
+/* AW35615のPD・role制御は別途移植する。USB2 peripheralのみ準備。 */
+&usb_host0_xhci {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb2phy0_otg>;
+	phy-names = "usb2-phy";
+	status = "okay";
+};
+
+&usb2phy0 {
+	status = "okay";
+};
+
+&usb2phy0_otg {
+	status = "okay";
+};
+
+/* 純正と同じCRU shutdown/active-low。閾値は本家の95℃を維持。 */
+&tsadc {
+	rockchip,hw-tshut-mode = <0>;
+	rockchip,hw-tshut-polarity = <0>;
+	status = "okay";
+};
+
+/* rk3568.dtsiでは有効だが、実SoCの識別前はHWRNGを使わない。 */
+&rng {
+	status = "disabled";
+};

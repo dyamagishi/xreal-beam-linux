@@ -1,0 +1,677 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/* 実機の稼働DTから配線・電源制約を移植。本家7.3のSoC定義を使用。 */
+#include "rk3568-xreal-beam.dts"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/usb/pd.h>
+#include <dt-bindings/clock/rockchip,rk808.h>
+#include <dt-bindings/media/video-interfaces.h>
+#include <dt-bindings/soc/rockchip,vop2.h>
+
+/* 実機dtboの__fixups__が参照するラベル。通常再起動の理由も明示する。 */
+&pmugrf {
+	reboot_mode: reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x200>;
+		mode-normal = <0x5242c300>;
+		mode-bootloader = <0x5242c309>;
+		mode-recovery = <0x5242c303>;
+		mode-loader = <0x5242c301>;
+	};
+};
+
+/ {
+	model = "XREAL Beam Linux 7.3";
+	aliases {
+		mmc1 = &sdmmc1;
+	};
+
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 0>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		poll-interval = <20>;
+		volume-up { label = "volume up"; linux,code = <KEY_VOLUMEUP>; press-threshold-microvolt = <0x280a0>; };
+		volume-down { label = "volume down"; linux,code = <KEY_VOLUMEDOWN>; press-threshold-microvolt = <0x4650>; };
+		mode { label = "mode"; linux,code = <0x13c>; press-threshold-microvolt = <0x5b3c4>; };
+		enter { label = "enter"; linux,code = <KEY_ENTER>; press-threshold-microvolt = <0xc67c8>; };
+		up { label = "up"; linux,code = <KEY_UP>; press-threshold-microvolt = <0x82dc0>; };
+		down { label = "down"; linux,code = <KEY_DOWN>; press-threshold-microvolt = <0xa57a8>; };
+		left { label = "left"; linux,code = <KEY_LEFT>; press-threshold-microvolt = <0xe88b4>; };
+		right { label = "right"; linux,code = <KEY_RIGHT>; press-threshold-microvolt = <0x10eff0>; };
+		back { label = "back"; linux,code = <KEY_BACK>; press-threshold-microvolt = <0x14c080>; };
+	};
+	/* LT7911UXC supplies the I2S clocks; the codec has no software controls. */
+	dpin_codec: dpin-codec {
+		compatible = "linux,spdif-dir";
+		#sound-dai-cells = <0>;
+	};
+	dpin-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,dummy-codec";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,bitclock-master = <&dpin_master>;
+		simple-audio-card,frame-master = <&dpin_master>;
+		simple-audio-card,cpu { sound-dai = <&i2s1_8ch>; };
+		dpin_master: simple-audio-card,codec { sound-dai = <&dpin_codec>; };
+	};
+	dpout-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rkhdmianalogsnd";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,cpu { sound-dai = <&i2s0_8ch>; };
+		simple-audio-card,codec { sound-dai = <&edp>; };
+	};
+
+	vsys_4v2: regulator-vsys {
+		compatible = "regulator-fixed";
+		regulator-name = "vsys_4v2";
+		regulator-min-microvolt = <4200000>;
+		regulator-max-microvolt = <4200000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	/* 純正DTのPMIC入力はvdd_3v3_sys。物理電源の推定で変更しない。 */
+	vdd_3v3_sys: regulator-system {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_3v3_sys";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vsys_4v2>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	vdd_3v3_fan: regulator-fan {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_3v3_fan";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vsys_4v2>;
+		gpio = <&gpio4 RK_PC6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	vcc_wifi: regulator-wifi {
+		compatible = "regulator-fixed";
+		regulator-name = "wifi-vbat";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vdd_3v3_sys>;
+		gpio = <&gpio0 RK_PD3 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	pwm_fan: pwm-fan {
+		compatible = "pwm-fan";
+		pwms = <&pwm0 0 40000 0>;
+		fan-supply = <&vdd_3v3_fan>;
+		/* 初回運用は停止せず、温度上昇に応じて増速する。 */
+		cooling-levels = <100 150 200 255>;
+		#cooling-cells = <2>;
+	};
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&rk809 RK808_CLKOUT1>;
+		clock-names = "ext_clock";
+		/* PMICのenableに加えてSoC側の外部LPO出力ピンも必要。 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&clk32k_out1>;
+		reset-gpios = <&gpio2 RK_PB1 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <200>;
+	};
+
+	reserved-memory {
+		ramoops@110000 {
+			compatible = "ramoops";
+			reg = <0 0x110000 0 0xf0000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x50000>;
+		};
+	};
+
+	battery {
+		compatible = "xreal,beam-rk809-gauge";
+		pmic = <&rk809>;
+		charge-controller = <&sc89601>;
+		charge-full-design-microamp-hours = <4933000>;
+		sense-resistor-micro-ohms = <10000>;
+	};
+
+	vbus_source: regulator-vbus-source {
+		compatible = "regulator-fixed";
+		regulator-name = "vbus5v0_otg";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&vsys_4v2>;
+		gpio = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+	lt_vdd11: regulator-lt-vdd11 {
+		compatible = "regulator-fixed";
+		regulator-name = "lt7911uxc-1v1";
+		regulator-min-microvolt = <1100000>;
+		regulator-max-microvolt = <1100000>;
+		gpio = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+	lt_vdd33: regulator-lt-vdd33 {
+		compatible = "regulator-fixed";
+		regulator-name = "lt7911uxc-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpio0 RK_PD6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	dp_source_mux: typec-dp-source-mux {
+		compatible = "xreal,beam-hd3ss460";
+		orientation-switch;
+		mode-switch;
+		enable-gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_HIGH>;
+		polarity-gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_HIGH>;
+		amsel-gpios = <&gpio0 RK_PB6 GPIO_ACTIVE_HIGH>;
+		hpd-gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 { reg = <0>; source_orientation: endpoint { remote-endpoint = <&source_con_orientation>; }; };
+			port@1 { reg = <1>; source_mode: endpoint { remote-endpoint = <&source_con_mode>; }; };
+		};
+	};
+	dp_sink_mux: typec-dp-sink-mux {
+		compatible = "xreal,beam-hd3ss460";
+		orientation-switch;
+		mode-switch;
+		enable-gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
+		polarity-gpios = <&gpio1 RK_PB0 GPIO_ACTIVE_HIGH>;
+		amsel-gpios = <&gpio1 RK_PB1 GPIO_ACTIVE_HIGH>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 { reg = <0>; sink_orientation: endpoint { remote-endpoint = <&sink_con_orientation>; }; };
+			port@1 { reg = <1>; sink_mode: endpoint { remote-endpoint = <&sink_con_mode>; }; };
+		};
+	};
+
+	edp_phy_grf: syscon@fdcb0000 {
+		compatible = "rockchip,rk3568-edp-phy-grf", "syscon", "simple-mfd";
+		reg = <0 0xfdcb0000 0 0x100>;
+		clocks = <&cru PCLK_EDPPHY_GRF>;
+		edp_phy: edp-phy {
+			compatible = "rockchip,rk3568-edp-phy";
+			clocks = <&pmucru XIN_OSC0_EDPPHY_G>;
+			clock-names = "refclk";
+			#phy-cells = <0>;
+		};
+	};
+	dp_output: dp-connector {
+		compatible = "dp-connector";
+		type = "full-size";
+		port { dp_output_in: endpoint { remote-endpoint = <&edp_output>; }; };
+	};
+	edp: edp@fe0c0000 {
+		#sound-dai-cells = <0>;
+		compatible = "rockchip,rk3568-edp";
+		reg = <0 0xfe0c0000 0 0x10000>;
+		interrupts = <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&pmucru XIN_OSC0_EDPPHY_G>, <&cru PCLK_EDP_CTRL>, <&cru HCLK_VO>;
+		clock-names = "dp", "pclk", "hclk";
+		resets = <&cru SRST_EDP_24M>, <&cru SRST_P_EDP_CTRL>;
+		reset-names = "dp", "apb";
+		rockchip,grf = <&grf>;
+		phys = <&edp_phy>;
+		phy-names = "dp";
+		power-domains = <&power RK3568_PD_VO>;
+		hpd-gpios = <&gpio0 RK_PC2 GPIO_ACTIVE_HIGH>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 { reg = <0>; edp_input: endpoint { remote-endpoint = <&vp0_edp>; }; };
+			port@1 { reg = <1>; edp_output: endpoint { remote-endpoint = <&dp_output_in>; }; };
+		};
+	};
+
+	csi: csi@fdfb0000 {
+		compatible = "rockchip,rk3568-mipi-csi2";
+		reg = <0 0xfdfb0000 0 0x10000>;
+		interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "err1", "err2";
+		clocks = <&cru PCLK_CSI2HOST1>;
+		phys = <&csi_dphy>;
+		power-domains = <&power RK3568_PD_VI>;
+		resets = <&cru SRST_P_CSI2HOST1>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				csi_input: endpoint {
+					bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+					data-lanes = <1 2 3 4>;
+					remote-endpoint = <&lt_output>;
+				};
+			};
+			port@1 { reg = <1>; csi_output: endpoint { remote-endpoint = <&vicap_input>; }; };
+		};
+	};
+};
+
+&gpio0 {
+	input-route-hog {
+		gpio-hog;
+		gpios = <RK_PA4 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "input-charge-route";
+	};
+};
+
+&i2c0 {
+	sc89601: charger@6b {
+		compatible = "sc,sc89601d-charger";
+		reg = <0x6b>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PC1 IRQ_TYPE_EDGE_FALLING>;
+		/* TCPMのpower_supplyはconnectorではなくI2Cデバイスをfwnodeにする。 */
+		charger-phandle = <&aw_input>;
+		sc,charge-current = <480000>;
+		sc,battery-regulation-voltage = <4400000>;
+		sc,termination-current = <60000>;
+		sc,precharge-current = <180000>;
+		sc,minimum-sys-voltage = <3500000>;
+		sc,boost-voltage = <5000000>;
+		sc,boost-max-current = <1200000>;
+	};
+	aw_input: typec@22 {
+		compatible = "awinic,aw35615";
+		reg = <0x22>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PC3 IRQ_TYPE_LEVEL_LOW>;
+		vbus-supply = <&vbus_source>;
+		charge-enable-gpios = <&gpio0 RK_PD5 GPIO_ACTIVE_LOW>;
+		input_connector: connector {
+			compatible = "usb-c-connector";
+			label = "Beam DP input and charging";
+			/* 電池駆動。PORT_RESET中はRdを外して以前のPD状態を解消する。 */
+			self-powered;
+			/* 現移植の入力PD3拡張要求後にreset loopを実測。PD2へ制限する。 */
+			pd-revision = /bits/ 8 <2 0 1 0>;
+			data-role = "device";
+			power-role = "sink";
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+			op-sink-microwatt = <10000000>;
+			sink-vdos = <0x6c00057e 0 0x20030001 0x5100007b 0xff010000 0x05000000>;
+			sink-vdos-v1 = <0x6c00057e 0 0x20030001 0x5100007b 0xff010000 0x05000000>;
+			xreal,dp-sink;
+			altmodes {
+				/* bit7=1はUSB2不要。管理NCM/ACMを併用するので0。 */
+				displayport { svid = /bits/ 16 <0xff01>; vdo = <0x00140045>; };
+			};
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 { reg = <0>; input_usb: endpoint { remote-endpoint = <&usb_input_role>; }; };
+				port@1 { reg = <1>; sink_con_orientation: endpoint { remote-endpoint = <&sink_orientation>; }; };
+				port@2 { reg = <2>; sink_con_mode: endpoint { remote-endpoint = <&sink_mode>; }; };
+				port@3 { reg = <3>; sink_con_receiver: endpoint { remote-endpoint = <&lt_mode>; }; };
+			};
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	aw_output: typec@22 {
+		compatible = "awinic,aw35615";
+		reg = <0x22>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_LOW>;
+		vbus-supply = <&vbus_source>;
+		/* LowでI2C応答消失、Highで復帰することを実機で確認した経路制御。 */
+		i2c-route-enable-gpios = <&gpio1 RK_PD7 GPIO_ACTIVE_HIGH>;
+		output_connector: connector {
+			compatible = "usb-c-connector";
+			label = "Beam glasses output";
+			data-role = "host";
+			power-role = "source";
+			source-pdos = <PDO_FIXED(5000, 1150, PDO_FIXED_USB_COMM)>;
+			displayport = <&dp_output>;
+			altmodes {
+				displayport { svid = /bits/ 16 <0xff01>; vdo = <0x000014c6>; };
+			};
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@1 { reg = <1>; source_con_orientation: endpoint { remote-endpoint = <&source_orientation>; }; };
+				port@2 { reg = <2>; source_con_mode: endpoint { remote-endpoint = <&source_mode>; }; };
+			};
+		};
+	};
+};
+
+&i2c3 {
+	clock-frequency = <400000>;
+	status = "okay";
+	lt7911: bridge@43 {
+		compatible = "xreal,beam-lt7911uxc";
+		reg = <0x43>;
+		reset-gpios = <&gpio1 RK_PA5 GPIO_ACTIVE_LOW>;
+		vdd11-supply = <&lt_vdd11>;
+		vdd33-supply = <&lt_vdd33>;
+		image-0v9-supply = <&vdda0v9_image>;
+		image-1v8-supply = <&vcca1v8_image>;
+		mode-switch;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				lt_output: endpoint {
+					bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+					data-lanes = <1 2 3 4>;
+					remote-endpoint = <&csi_input>;
+				};
+			};
+			port@1 { reg = <1>; lt_mode: endpoint { remote-endpoint = <&sink_con_receiver>; }; };
+		};
+	};
+};
+
+&usb_host0_xhci {
+	dr_mode = "otg";
+	/* Management USB2 LPM is disabled during the validated host connection. */
+	snps,usb2-gadget-lpm-disable;
+	/* 元Ubuntu DTと実機GUSB2PHYCFG=0x00101408を維持する。 */
+	snps,dis_enblslpm_quirk;
+	snps,dis-u2-freeclk-exists-quirk;
+	role-switch-default-mode = "peripheral";
+	usb-role-switch;
+	port { usb_input_role: endpoint { remote-endpoint = <&input_usb>; }; };
+};
+&usb_host1_xhci { status = "okay"; };
+&usb2phy0_host { status = "okay"; };
+&combphy1 { status = "okay"; };
+&display_subsystem { status = "okay"; };
+&vop { status = "okay"; };
+&vop_mmu { status = "okay"; };
+&vp0 {
+	vp0_edp: endpoint@3 { reg = <ROCKCHIP_VOP2_EP_EDP0>; remote-endpoint = <&edp_input>; };
+};
+&csi_dphy { status = "okay"; };
+&vicap { status = "okay"; };
+&vicap_mipi {
+	vicap_input: endpoint { remote-endpoint = <&csi_output>; };
+};
+
+&pwm0 {
+	pinctrl-0 = <&pwm0m1_pins>;
+	status = "okay";
+};
+
+&cpu_thermal {
+	trips {
+		fan_trip: fan-trip {
+			temperature = <50000>;
+			hysteresis = <5000>;
+			type = "active";
+		};
+	};
+	cooling-maps {
+		fan-map {
+			trip = <&fan_trip>;
+			cooling-device = <&pwm_fan 0 3>;
+		};
+	};
+};
+
+&i2c0 {
+	clock-frequency = <400000>;
+	status = "okay";
+	vdd_cpu: regulator@40 {
+		/* 現物ID=8。VSEL0=0x91と旧925000uVが712500+17*12500で一致。 */
+		compatible = "rockchip,rk8600";
+		reg = <0x40>;
+		vin-supply = <&vdd_3v3_sys>;
+		regulator-name = "vdd_cpu";
+		regulator-min-microvolt = <712500>;
+		regulator-max-microvolt = <1150000>;
+		regulator-ramp-delay = <2300>;
+		fcs,suspend-voltage-selector = <1>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	rk809: pmic@20 {
+		compatible = "rockchip,rk809";
+		reg = <0x20>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA3 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pmic_int>;
+		system-power-controller;
+		wakeup-source;
+		#clock-cells = <1>;
+		clock-output-names = "rk808-clkout1", "rk808-clkout2";
+		vcc1-supply = <&vdd_3v3_sys>;
+		vcc2-supply = <&vdd_3v3_sys>;
+		vcc3-supply = <&vdd_3v3_sys>;
+		vcc4-supply = <&vdd_3v3_sys>;
+		vcc5-supply = <&vdd_3v3_sys>;
+		vcc6-supply = <&vdd_3v3_sys>;
+		vcc7-supply = <&vdd_3v3_sys>;
+		vcc8-supply = <&vdd_3v3_sys>;
+		vcc9-supply = <&vdd_3v3_sys>;
+		regulators {
+			vdd_logic: DCDC_REG1 {
+				regulator-name = "vdd_logic";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vdd_gpu: DCDC_REG2 {
+				regulator-name = "vdd_gpu";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcc_ddr: DCDC_REG3 {
+				regulator-name = "vcc_ddr";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vdd_npu: DCDC_REG4 {
+				regulator-name = "vdd_npu";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcc_1v8: DCDC_REG5 {
+				regulator-name = "vcc_1v8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vdda0v9_image: LDO_REG1 {
+				regulator-name = "vdda0v9_image";
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+			};
+			vdda_0v9: LDO_REG2 {
+				regulator-name = "vdda_0v9";
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vdda0v9_pmu: LDO_REG3 {
+				regulator-name = "vdda0v9_pmu";
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vccio_acodec: LDO_REG4 {
+				regulator-name = "vccio_acodec";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vccio_sd: LDO_REG5 {
+				regulator-name = "vccio_sd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcc3v3_pmu: LDO_REG6 {
+				regulator-name = "vcc3v3_pmu";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcca_1v8: LDO_REG7 {
+				regulator-name = "vcca_1v8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcca1v8_pmu: LDO_REG8 {
+				regulator-name = "vcca1v8_pmu";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcca1v8_image: LDO_REG9 {
+				regulator-name = "vcca1v8_image";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+			vcc_3v3: SWITCH_REG1 {
+				regulator-name = "vcc_3v3";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+			vcc3v3_sd: SWITCH_REG2 {
+				regulator-name = "vcc3v3_sd";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+		};
+	};
+};
+
+&pinctrl {
+	pmic {
+		pmic_int: pmic-int {
+			rockchip,pins = <0 RK_PA3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};
+
+&pmu_io_domains {
+	pmuio2-supply = <&vcc3v3_pmu>;
+	vccio1-supply = <&vccio_acodec>;
+	vccio3-supply = <&vccio_sd>;
+	vccio4-supply = <&vcc_1v8>;
+	vccio5-supply = <&vcc_3v3>;
+	vccio6-supply = <&vcc_1v8>;
+	vccio7-supply = <&vcc_1v8>;
+	status = "okay";
+};
+
+&sdmmc1 {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	non-removable;
+	disable-wp;
+	keep-power-in-suspend;
+	max-frequency = <50000000>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	vmmc-supply = <&vcc_wifi>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc1_bus4 &sdmmc1_clk &sdmmc1_cmd>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	wifi@1 {
+		compatible = "brcm,bcm4329-fmac";
+		reg = <1>;
+	};
+};
+
+&uart1 {
+	uart-has-rtscts;
+	pinctrl-0 = <&uart1m0_xfer &uart1m0_ctsn &uart1m0_rtsn>;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	status = "okay";
+	bluetooth {
+		compatible = "brcm,bcm43438-bt";
+		/* 現行patchramのBD_ADDRを保持し、既存bondの識別子を変えない。 */
+		clocks = <&rk809 RK808_CLKOUT1>;
+		clock-names = "lpo";
+		shutdown-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpio2 RK_PC1 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_HIGH>;
+		max-speed = <1500000>;
+	};
+};
+
+&gpu {
+	mali-supply = <&vdd_gpu>;
+	status = "okay";
+};
+
+&saradc {
+	vref-supply = <&vcca_1v8>;
+	status = "okay";
+};
+
+&wdt {
+	status = "okay";
+};
+
+&i2s0_8ch {
+	rockchip,playback-only;
+	status = "okay";
+};
+
+&i2s1_8ch {
+	/* 旧RKのclk-trcm=2に相当する本家のRXクロック共有指定。 */
+	rockchip,trcm-sync-rx-only;
+	dmas = <&dmac1 3>;
+	dma-names = "rx";
+	resets = <&cru SRST_M_I2S1_8CH_TX>, <&cru SRST_M_I2S1_8CH_RX>,
+		 <&cru SRST_H_I2S1_8CH>;
+	reset-names = "tx-m", "rx-m", "h";
+	pinctrl-0 = <&i2s1m0_lrckrx &i2s1m0_mclk &i2s1m0_sclkrx &i2s1m0_sdi0>;
+	status = "okay";
+};
+
+/* Match the verified 4.19 frequency range; use upstream nominal voltages. */
+&cpu0 { cpu-supply = <&vdd_cpu>; operating-points-v2 = <&cpu0_opp_table>; };
+&cpu1 { cpu-supply = <&vdd_cpu>; operating-points-v2 = <&cpu0_opp_table>; };
+&cpu2 { cpu-supply = <&vdd_cpu>; operating-points-v2 = <&cpu0_opp_table>; };
+&cpu3 { cpu-supply = <&vdd_cpu>; operating-points-v2 = <&cpu0_opp_table>; };
+&cpu0_opp_table {
+	opp-1992000000 { status = "disabled"; };
+};
