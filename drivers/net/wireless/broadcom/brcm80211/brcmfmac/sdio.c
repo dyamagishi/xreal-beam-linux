@@ -4257,6 +4257,25 @@ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
 			u32 address;
 			int diagnostic_ret;
 
+			/* Read-only PMU state, to compare with the working DHD host. */
+			{
+				struct brcmf_core *pmu = brcmf_chip_get_pmu(bus->ci);
+				const u32 offsets[] = {0x600, 0x604, 0x608, 0x60c,
+					0x610, 0x614, 0x618, 0x61c};
+				unsigned int i;
+
+				brcmf_err("boot diagnostic: RAM base=%08x size=%08x sr=%08x PMU base=%08x rev=%u\n",
+					bus->ci->rambase, bus->ci->ramsize,
+					bus->ci->srsize, pmu->base, bus->ci->pmurev);
+				for (i = 0; i < ARRAY_SIZE(offsets); i++) {
+					int read_err = 0;
+					u32 value = brcmf_sdiod_readl(sdiod,
+						pmu->base + offsets[i], &read_err);
+
+					brcmf_err("boot diagnostic: PMU+%03x=%08x read=%d\n",
+						offsets[i], value, read_err);
+				}
+			}
 			diagnostic_ret = brcmf_sdiod_ramrw(sdiod, false,
 							   end - 4, (u8 *)&tail,
 							   sizeof(tail));
