@@ -11,11 +11,14 @@
 
 struct analogix_dp_device;
 struct drm_dp_aux;
+struct hdmi_codec_daifmt;
+struct hdmi_codec_params;
 
 enum analogix_dp_devtype {
 	EXYNOS_DP,
 	RK3288_DP,
 	RK3399_EDP,
+	RK3568_EDP,
 	RK3576_EDP,
 	RK3588_EDP,
 };
@@ -25,6 +28,7 @@ static inline bool analogix_dp_is_rockchip(enum analogix_dp_devtype type)
 	switch (type) {
 	case RK3288_DP:
 	case RK3399_EDP:
+	case RK3568_EDP:
 	case RK3576_EDP:
 	case RK3588_EDP:
 		return true;
@@ -59,5 +63,11 @@ int analogix_dp_stop_crc(struct drm_connector *connector);
 struct analogix_dp_plat_data *analogix_dp_aux_to_plat_data(struct drm_dp_aux *aux);
 struct drm_dp_aux *analogix_dp_get_aux(struct analogix_dp_device *dp);
 int analogix_dp_finish_probe(struct analogix_dp_device *dp);
+
+int analogix_dp_audio_hw_params(struct analogix_dp_device *dp,
+                              struct hdmi_codec_daifmt *fmt,
+                              struct hdmi_codec_params *params);
+int analogix_dp_audio_startup(struct analogix_dp_device *dp);
+void analogix_dp_audio_shutdown(struct analogix_dp_device *dp);
 
 #endif /* _ANALOGIX_DP_H_ */

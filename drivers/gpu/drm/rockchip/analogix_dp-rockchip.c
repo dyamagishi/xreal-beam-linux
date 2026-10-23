@@ -19,6 +19,7 @@
 #include <linux/reset.h>
 #include <linux/clk.h>
 
+#include <sound/hdmi-codec.h>
 #include <video/of_videomode.h>
 #include <video/videomode.h>
 
@@ -79,6 +80,8 @@ struct rockchip_dp_device {
 	const struct rockchip_dp_chip_data *data;
 
 	struct analogix_dp_device *adp;
+	struct platform_device *audio_pdev;
+	struct drm_connector *audio_connector;
 	struct analogix_dp_plat_data plat_data;
 };
 
@@ -112,6 +115,60 @@ static int rockchip_grf_field_write(struct regmap *grf,
 	val <<= field->lsb;
 
 	return rockchip_grf_write(grf, field->reg, mask, val);
+}
+
+/* Keep runtime power held for the duration of an ALSA stream. */
+static int beam_dp_audio_startup(struct device *dev, void *data)
+{
+	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
+	int ret = pm_runtime_resume_and_get(dev);
+
+	if (ret < 0)
+		return ret;
+	ret = analogix_dp_audio_startup(dp->adp);
+	if (ret)
+		pm_runtime_put(dev);
+	return ret;
+}
+
+static void beam_dp_audio_shutdown(struct device *dev, void *data)
+{
+	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
+
+	analogix_dp_audio_shutdown(dp->adp);
+	pm_runtime_put(dev);
+}
+
+static int beam_dp_audio_hw_params(struct device *dev, void *data,
+                                  struct hdmi_codec_daifmt *fmt,
+                                  struct hdmi_codec_params *params)
+{
+	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
+
+	return analogix_dp_audio_hw_params(dp->adp, fmt, params);
+}
+
+static int beam_dp_audio_get_eld(struct device *dev, void *data, u8 *buf, size_t len)
+{
+	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
+	struct drm_connector *connector = dp->audio_connector;
+
+	if (!connector)
+		return -ENODEV;
+	memcpy(buf, connector->eld, min(sizeof(connector->eld), len));
+	return 0;
+}
+
+static const struct hdmi_codec_ops beam_dp_audio_ops = {
+	.audio_startup = beam_dp_audio_startup,
+	.audio_shutdown = beam_dp_audio_shutdown,
+	.hw_params = beam_dp_audio_hw_params,
+	.get_eld = beam_dp_audio_get_eld,
+};
+
+static void beam_dp_unregister_codec(void *data)
+{
+	platform_device_unregister(data);
 }
 
 static int rockchip_dp_pre_init(struct rockchip_dp_device *dp)
@@ -410,6 +467,7 @@ static int rockchip_dp_bind(struct device *dev, struct device *master,
 		goto err_cleanup_encoder;
 	}
 
+	dp->audio_connector = connector;
 	return 0;
 err_cleanup_encoder:
 	dp->encoder.encoder.funcs->destroy(&dp->encoder.encoder);
@@ -421,6 +479,7 @@ static void rockchip_dp_unbind(struct device *dev, struct device *master,
 {
 	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
 
+	dp->audio_connector = NULL;
 	analogix_dp_unbind(dp->adp);
 	dp->encoder.encoder.funcs->destroy(&dp->encoder.encoder);
 }
@@ -482,6 +541,22 @@ static int rockchip_dp_probe(struct platform_device *pdev)
 	if (IS_ERR(dp->adp))
 		return PTR_ERR(dp->adp);
 
+	if (dp->data->chip_type == RK3568_EDP) {
+		struct hdmi_codec_pdata codec = {
+			.ops = &beam_dp_audio_ops,
+			.i2s = 1,
+			.max_i2s_channels = 2,
+		};
+
+		dp->audio_pdev = platform_device_register_data(dev, HDMI_CODEC_DRV_NAME,
+				PLATFORM_DEVID_AUTO, &codec, sizeof(codec));
+		if (IS_ERR(dp->audio_pdev))
+			return PTR_ERR(dp->audio_pdev);
+		ret = devm_add_action_or_reset(dev, beam_dp_unregister_codec,
+		                              dp->audio_pdev);
+		if (ret)
+			return ret;
+	}
 	return analogix_dp_finish_probe(dp->adp);
 }
 
@@ -541,6 +616,14 @@ static const struct rockchip_dp_chip_data rk3288_dp[] = {
 	{ /* sentinel */ }
 };
 
+static const struct rockchip_dp_chip_data rk3568_edp[] = {
+	{
+		.chip_type = RK3568_EDP,
+		.reg = 0xfe0c0000,
+	},
+	{ /* sentinel */ }
+};
+
 static const struct rockchip_dp_chip_data rk3576_edp[] = {
 	{
 		.chip_type = RK3576_EDP,
@@ -566,6 +649,7 @@ static const struct rockchip_dp_chip_data rk3588_edp[] = {
 static const struct of_device_id rockchip_dp_dt_ids[] = {
 	{.compatible = "rockchip,rk3288-dp", .data = &rk3288_dp },
 	{.compatible = "rockchip,rk3399-edp", .data = &rk3399_edp },
+	{.compatible = "rockchip,rk3568-edp", .data = &rk3568_edp },
 	{.compatible = "rockchip,rk3576-edp", .data = &rk3576_edp },
 	{.compatible = "rockchip,rk3588-edp", .data = &rk3588_edp },
 	{}

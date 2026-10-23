@@ -33,6 +33,7 @@
 #include <linux/usb/role.h>
 #include <linux/usb/tcpm.h>
 #include <linux/usb/typec_altmode.h>
+#include <linux/usb/typec_dp.h>
 
 #include <uapi/linux/sched/types.h>
 
@@ -634,6 +635,7 @@ struct tcpm_port {
 	struct typec_altmode *partner_altmode[ALTMODE_DISCOVERY_MAX];
 	struct typec_altmode *plug_prime_altmode[ALTMODE_DISCOVERY_MAX];
 	struct typec_altmode *port_altmode[ALTMODE_DISCOVERY_MAX];
+	bool beam_dp_sink_entered;
 
 	/* Deadline in jiffies to exit src_try_wait state */
 	unsigned long max_wait;
@@ -2417,6 +2419,85 @@ static int tcpm_handle_discover_mode(struct tcpm_port *port, u32 *response,
 	return 0;
 }
 
+/*
+ * Beam is a DP receiver on its USB device port. The generic DP altmode
+ * driver currently initiates DFP discovery only. Keep this responder opt-in
+ * and restrict configuration to the advertised four-lane C/E assignments.
+ * Return zero for unrelated commands, -1 for NAK, or an ACK payload count.
+ */
+static int tcpm_beam_dp_sink(struct tcpm_port *port, const u32 *p, int cnt,
+			     u32 *response)
+{
+	struct typec_altmode *alt;
+	u32 conf, pin;
+	int cmd = PD_VDO_CMD(p[0]);
+	int ret;
+
+	if (port->data_role != TYPEC_DEVICE ||
+	    !fwnode_property_read_bool(port->tcpc->fwnode, "xreal,dp-sink"))
+		return 0;
+	alt = typec_match_altmode(port->port_altmode, ALTMODE_DISCOVERY_MAX,
+				 USB_TYPEC_DP_SID, 1);
+	if (IS_ERR_OR_NULL(alt))
+		return 0;
+	if (cmd == CMD_DISCOVER_SVID && PD_VDO_VID(p[0]) == USB_SID_PD) {
+		port->ams = DISCOVER_SVIDS;
+		response[1] = (u32)USB_TYPEC_DP_SID << 16;
+		return 2;
+	}
+	if (PD_VDO_VID(p[0]) != USB_TYPEC_DP_SID)
+		return 0;
+	if (cmd == CMD_DISCOVER_MODES) {
+		port->ams = DISCOVER_MODES;
+		response[1] = alt->vdo;
+		return 2;
+	}
+	if (PD_VDO_OPOS(p[0]) != 1)
+		return -1;
+	switch (cmd) {
+	case CMD_ENTER_MODE:
+		port->ams = DFP_TO_UFP_ENTER_MODE;
+		port->beam_dp_sink_entered = true;
+		typec_altmode_update_active(alt, true);
+		tcpm_log(port, "Beam DP sink: entered mode");
+		return 1;
+	case CMD_EXIT_MODE:
+		port->ams = DFP_TO_UFP_EXIT_MODE;
+		ret = typec_set_mode(port->typec_port, TYPEC_STATE_USB);
+		if (ret)
+			return -1;
+		port->beam_dp_sink_entered = false;
+		typec_altmode_update_active(alt, false);
+		return 1;
+	case DP_CMD_STATUS_UPDATE:
+		if (!port->beam_dp_sink_entered || cnt != 2)
+			return -1;
+		response[1] = DP_STATUS_CON_UFP_D | DP_STATUS_ENABLED | DP_STATUS_HPD_STATE;
+		return 2;
+	case DP_CMD_CONFIGURE:
+		if (!port->beam_dp_sink_entered || cnt != 2)
+			return -1;
+		conf = p[1];
+		if (!DP_CONF_CURRENTLY(conf)) {
+			ret = typec_set_mode(port->typec_port, TYPEC_STATE_USB);
+			return ret ? -1 : 1;
+		}
+		pin = (conf >> 8) & 0xff;
+		if (DP_CONF_CURRENTLY(conf) != DP_CONF_UFP_U_AS_UFP_D ||
+		    !(DP_CAP_UFP_D_PIN_ASSIGN(alt->vdo) & pin) ||
+		    (pin != BIT(DP_PIN_ASSIGN_C) && pin != BIT(DP_PIN_ASSIGN_E)))
+			return -1;
+		ret = typec_set_mode(port->typec_port,
+				    pin == BIT(DP_PIN_ASSIGN_C) ? TYPEC_DP_STATE_C : TYPEC_DP_STATE_E);
+		if (ret)
+			return -1;
+		tcpm_log(port, "Beam DP sink: configured pin 0x%x", pin);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static int tcpm_pd_svdm(struct tcpm_port *port, struct typec_altmode *adev,
 			const u32 *p, int cnt, u32 *response,
 			enum adev_actions *adev_action,
@@ -2487,6 +2568,12 @@ static int tcpm_pd_svdm(struct tcpm_port *port, struct typec_altmode *adev,
 		if (rx_sop_type == TCPC_TX_SOP_PRIME)
 			return 0;
 
+		ret = tcpm_beam_dp_sink(port, p, cnt, response);
+		if (ret) {
+			rlen = max(ret, 0);
+			goto respond_svdm;
+		}
+
 		switch (cmd) {
 		case CMD_DISCOVER_IDENT:
 			if (PD_VDO_VID(p[0]) != USB_SID_PD)
@@ -2540,6 +2627,7 @@ static int tcpm_pd_svdm(struct tcpm_port *port, struct typec_altmode *adev,
 		default:
 			break;
 		}
+	respond_svdm:
 		if (rlen >= 1) {
 			response[0] = p[0] | VDO_CMDT(CMDT_RSP_ACK);
 		} else if (rlen == 0) {
@@ -5145,6 +5233,7 @@ static void tcpm_partner_source_caps_reset(struct tcpm_port *port)
 
 static void tcpm_reset_port(struct tcpm_port *port)
 {
+	port->beam_dp_sink_entered = false;
 	tcpm_enable_auto_vbus_discharge(port, false);
 	port->in_ams = false;
 	port->ams = NONE_AMS;

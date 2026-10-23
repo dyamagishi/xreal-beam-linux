@@ -525,6 +525,7 @@ void analogix_dp_set_link_bandwidth(struct analogix_dp_device *dp, u32 bwtype)
 
 		phy_cfg.dp.link_rate =
 			drm_dp_bw_code_to_link_rate(dp->link_train.link_rate) / 100;
+		phy_cfg.dp.lanes = dp->link_train.lane_count;
 		phy_cfg.dp.set_rate = true;
 		ret = phy_configure(dp->phy, &phy_cfg);
 		if (ret && ret != -EOPNOTSUPP) {
@@ -596,6 +597,7 @@ void analogix_dp_set_lane_link_training(struct analogix_dp_device *dp)
 		}
 
 		phy_cfg.dp.set_voltages = true;
+		phy_cfg.dp.lanes = dp->link_train.lane_count;
 		ret = phy_configure(dp->phy, &phy_cfg);
 		if (ret && ret != -EOPNOTSUPP) {
 			dev_err(dp->dev, "%s: phy_configure() failed: %d\n", __func__, ret);

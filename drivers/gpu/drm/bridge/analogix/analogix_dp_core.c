@@ -19,6 +19,7 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <sound/hdmi-codec.h>
 
 #include <drm/bridge/analogix_dp.h>
 #include <drm/display/drm_dp_aux_bus.h>
@@ -37,6 +38,50 @@
 #include "analogix_dp_reg.h"
 
 #define to_dp(nm)	container_of(nm, struct analogix_dp_device, nm)
+
+/* RK3568 I2S audio sequence from Rockchip 6.12 analogix_dp_reg.c.
+ * Restrict the initial port to the measured Beam stereo S16_LE path. */
+int analogix_dp_audio_hw_params(struct analogix_dp_device *dp,
+                               struct hdmi_codec_daifmt *fmt,
+                               struct hdmi_codec_params *params)
+{
+	u32 val;
+
+	if (dp->plat_data->dev_type != RK3568_EDP || fmt->fmt != HDMI_I2S ||
+	    params->channels != 2 || params->sample_width != 16)
+		return -EINVAL;
+	val = readl(dp->reg_base + ANALOGIX_DP_SYS_CTL_4);
+	writel(val & ~FIX_M_AUD, dp->reg_base + ANALOGIX_DP_SYS_CTL_4);
+	/* I2S_CTRL, I2S_EN (RK3568 extension). */
+	val = readl(dp->reg_base + 0x9c8);
+	writel(val | BIT(4), dp->reg_base + 0x9c8);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(analogix_dp_audio_hw_params);
+
+int analogix_dp_audio_startup(struct analogix_dp_device *dp)
+{
+	u32 val = readl(dp->reg_base + ANALOGIX_DP_FUNC_EN_1);
+
+	val &= ~(AUD_FIFO_FUNC_EN_N | AUD_FUNC_EN_N);
+	writel(val, dp->reg_base + ANALOGIX_DP_FUNC_EN_1);
+	/* AUD_CTL: MISC_CTRL_RESET | DP_AUDIO_EN. */
+	val = readl(dp->reg_base + 0x618);
+	writel(val | BIT(4) | BIT(0), dp->reg_base + 0x618);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(analogix_dp_audio_startup);
+
+void analogix_dp_audio_shutdown(struct analogix_dp_device *dp)
+{
+	u32 val;
+
+	writel(0, dp->reg_base + 0x618);
+	val = readl(dp->reg_base + ANALOGIX_DP_FUNC_EN_1);
+	writel(val | AUD_FIFO_FUNC_EN_N | AUD_FUNC_EN_N,
+	       dp->reg_base + ANALOGIX_DP_FUNC_EN_1);
+}
+EXPORT_SYMBOL_GPL(analogix_dp_audio_shutdown);
 
 static const bool verify_fast_training;
 
@@ -1252,6 +1297,7 @@ static int analogix_dp_dt_parse_pdata(struct analogix_dp_device *dp)
 	switch (dp->plat_data->dev_type) {
 	case RK3288_DP:
 	case RK3399_EDP:
+	case RK3568_EDP:
 		/*
 		 * Like Rk3288 DisplayPort TRM indicate that "Main link
 		 * containing 4 physical lanes of 2.7/1.62 Gbps/lane".

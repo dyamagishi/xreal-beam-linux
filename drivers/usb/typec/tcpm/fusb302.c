@@ -79,6 +79,9 @@ struct fusb302_chip {
 	struct tcpc_dev tcpc_dev;
 
 	struct regulator *vbus;
+	struct gpio_desc *charge_enable;
+	struct gpio_desc *i2c_route_enable;
+	bool is_aw35615;
 
 	spinlock_t irq_lock;
 	struct work_struct irq_work;
@@ -566,6 +569,12 @@ static int fusb302_set_toggling(struct fusb302_chip *chip,
 			return ret;
 		chip->intr_togdone = true;
 		/* start toggling */
+		if (chip->is_aw35615) {
+			/* Awinic RK v1.1.0: leave audio accessory detection. */
+			ret = fusb302_i2c_set_bits(chip, 0x10, BIT(0));
+			if (ret < 0)
+				return ret;
+		}
 		ret = fusb302_i2c_set_bits(chip, FUSB_REG_CONTROL2,
 					   FUSB_REG_CONTROL2_TOGGLE);
 		if (ret < 0)
@@ -780,8 +789,10 @@ static int tcpm_set_vbus(struct tcpc_dev *dev, bool on, bool charge)
 	}
 	if (chip->charge_on == charge)
 		fusb302_log(chip, "charge is already %s", str_on_off(charge));
-	else
+	else {
 		chip->charge_on = charge;
+		gpiod_set_value_cansleep(chip->charge_enable, charge);
+	}
 
 done:
 	mutex_unlock(&chip->lock);
@@ -1706,6 +1717,7 @@ static int fusb302_probe(struct i2c_client *client)
 
 	chip->i2c_client = client;
 	chip->dev = &client->dev;
+	chip->is_aw35615 = of_device_is_compatible(dev->of_node, "awinic,aw35615");
 	mutex_init(&chip->lock);
 
 	/*
@@ -1724,6 +1736,13 @@ static int fusb302_probe(struct i2c_client *client)
 	chip->vbus = devm_regulator_get(chip->dev, "vbus");
 	if (IS_ERR(chip->vbus))
 		return PTR_ERR(chip->vbus);
+
+	chip->charge_enable = devm_gpiod_get_optional(dev, "charge-enable", GPIOD_OUT_LOW);
+	if (IS_ERR(chip->charge_enable))
+		return dev_err_probe(dev, PTR_ERR(chip->charge_enable), "charge enable GPIO\n");
+	chip->i2c_route_enable = devm_gpiod_get_optional(dev, "i2c-route-enable", GPIOD_OUT_HIGH);
+	if (IS_ERR(chip->i2c_route_enable))
+		return dev_err_probe(dev, PTR_ERR(chip->i2c_route_enable), "I2C route enable GPIO\n");
 
 	chip->wq = create_singlethread_workqueue(dev_name(chip->dev));
 	if (!chip->wq)
@@ -1835,6 +1854,8 @@ static int fusb302_pm_resume(struct device *dev)
 }
 
 static const struct of_device_id fusb302_dt_match[] __maybe_unused = {
+	/* Awinic RK v1.1.0 uses this register map and TCPM command sequence. */
+	{ .compatible = "awinic,aw35615" },
 	{.compatible = "fcs,fusb302"},
 	{},
 };
