@@ -636,6 +636,8 @@ struct tcpm_port {
 	struct typec_altmode *plug_prime_altmode[ALTMODE_DISCOVERY_MAX];
 	struct typec_altmode *port_altmode[ALTMODE_DISCOVERY_MAX];
 	bool beam_dp_sink_entered;
+	bool beam_soft_reset_used;
+	bool beam_hard_reset_used;
 
 	/* Deadline in jiffies to exit src_try_wait state */
 	unsigned long max_wait;
@@ -1006,6 +1008,20 @@ static int tcpm_debug_show(struct seq_file *s, void *v)
 }
 DEFINE_SHOW_ATTRIBUTE(tcpm_debug);
 
+static bool beam_pd_diagnostics;
+module_param_named(beam_pd_diagnostics, beam_pd_diagnostics, bool, 0400);
+MODULE_PARM_DESC(beam_pd_diagnostics,
+		 "Enable one-shot Beam PD reset diagnostics");
+static ssize_t tcpm_beam_soft_reset_write(struct file *file,
+					  const char __user *buffer,
+					  size_t count, loff_t *ppos);
+static const struct file_operations tcpm_beam_soft_reset_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = tcpm_beam_soft_reset_write,
+	.llseek = noop_llseek,
+};
+
 static void tcpm_debugfs_init(struct tcpm_port *port)
 {
 	char name[NAME_MAX];
@@ -1015,6 +1031,10 @@ static void tcpm_debugfs_init(struct tcpm_port *port)
 	port->dentry = debugfs_create_dir(name, usb_debug_root);
 	debugfs_create_file("log", S_IFREG | 0444, port->dentry, port,
 			    &tcpm_debug_fops);
+	if (beam_pd_diagnostics &&
+	    fwnode_property_read_bool(port->tcpc->fwnode, "xreal,dp-sink"))
+		debugfs_create_file("beam_pd_reset", 0200, port->dentry, port,
+				    &tcpm_beam_soft_reset_fops);
 }
 
 static void tcpm_debugfs_exit(struct tcpm_port *port)
@@ -1964,6 +1984,46 @@ static int tcpm_ams_start(struct tcpm_port *port, enum tcpm_ams ams)
 
 	return ret;
 }
+
+#ifdef CONFIG_DEBUG_FS
+/* CC/VBUS are left to the standard TCPM protocol state machine. Once per boot. */
+static ssize_t tcpm_beam_soft_reset_write(struct file *file,
+					  const char __user *buffer,
+					  size_t count, loff_t *ppos)
+{
+	struct tcpm_port *port = file->private_data;
+	char request;
+	int ret = 0;
+
+	if (count != 1 && count != 2)
+		return -EINVAL;
+	if (get_user(request, buffer))
+		return -EFAULT;
+	if (request != '1' && request != '2')
+		return -EINVAL;
+	mutex_lock(&port->lock);
+	if ((request == '1' ? port->beam_soft_reset_used :
+			      port->beam_hard_reset_used) ||
+	    !port->attached || !port->pd_capable || port->state != SNK_READY ||
+	    port->ams != NONE_AMS || port->vdm_sm_running) {
+		ret = -EBUSY;
+		goto out;
+	}
+	port->tx_sop_type = TCPC_TX_SOP;
+	if (request == '1') {
+		port->beam_soft_reset_used = true;
+		tcpm_log(port, "Beam diagnostic: one-shot PD soft reset");
+		tcpm_set_state(port, SNK_SOFT_RESET, 0);
+	} else {
+		port->beam_hard_reset_used = true;
+		tcpm_log(port, "Beam diagnostic: one-shot PD hard reset");
+		tcpm_set_state(port, HARD_RESET_SEND, 0);
+	}
+out:
+	mutex_unlock(&port->lock);
+	return ret ? ret : count;
+}
+#endif
 
 /*
  * VDM/VDO handling functions
