@@ -259,6 +259,23 @@ static int fusb302_i2c_block_write(struct fusb302_chip *chip, u8 address,
 	if (length <= 0)
 		return ret;
 
+	/* Seven PD data objects plus FIFO tokens exceed SMBus' 32-byte limit. */
+	if (length > I2C_SMBUS_BLOCK_MAX) {
+		u8 fifo[41];
+
+		if (length > sizeof(fifo) - 1)
+			return -EINVAL;
+		if (!i2c_check_functionality(chip->i2c_client->adapter, I2C_FUNC_I2C))
+			return -EOPNOTSUPP;
+		fifo[0] = address;
+		memcpy(fifo + 1, data, length);
+		ret = i2c_master_send(chip->i2c_client, fifo, length + 1);
+		fusb302_log(chip, "full FIFO write register=0x%02x bytes=%u transferred=%d",
+			    address, length, ret);
+		if (ret == length + 1)
+			return 0;
+		return ret < 0 ? ret : -EIO;
+	}
 	ret = i2c_smbus_write_i2c_block_data(chip->i2c_client, address,
 					     length, data);
 	if (ret < 0)
