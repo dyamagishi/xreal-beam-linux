@@ -4246,8 +4246,98 @@ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
 
 	/* Make sure backplane clock is on, needed to generate F2 interrupt */
 	brcmf_sdio_clkctl(bus, CLK_AVAIL, false);
-	if (bus->clkstate != CLK_AVAIL)
+	if (bus->clkstate != CLK_AVAIL) {
+#ifdef CONFIG_BRCMDBG
+		/* Read-only boot-state evidence, only with explicit INFO debugging. */
+		if ((brcmf_msg_level & BRCMF_INFO_VAL) &&
+		    bus->ci->chip == BRCM_CC_4345_CHIP_ID) {
+			__le32 tail = 0;
+			struct sdpcm_shared_le shared = {};
+			u32 end = bus->ci->rambase + bus->ci->ramsize;
+			u32 address;
+			int diagnostic_ret;
+
+			diagnostic_ret = brcmf_sdiod_ramrw(sdiod, false,
+							   end - 4, (u8 *)&tail,
+							   sizeof(tail));
+			address = le32_to_cpu(tail);
+			brcmf_err("boot diagnostic: RAM tail=%08x read=%d\n",
+				  address, diagnostic_ret);
+			if (!diagnostic_ret && address >= bus->ci->rambase &&
+			    address <= end - sizeof(shared) && !(address & 3)) {
+				diagnostic_ret = brcmf_sdiod_ramrw(
+					sdiod, false, address, (u8 *)&shared,
+					sizeof(shared));
+				brcmf_err(
+					"boot diagnostic: shared read=%d flags=%08x trap=%08x console=%08x assert_line=%u\n",
+					diagnostic_ret,
+					le32_to_cpu(shared.flags),
+					le32_to_cpu(shared.trap_addr),
+					le32_to_cpu(shared.console_addr),
+					le32_to_cpu(shared.assert_line));
+				if (!diagnostic_ret) {
+					__le32 log[3] = {};
+					u32 console = le32_to_cpu(
+						shared.console_addr);
+					u32 start, size, index, offset;
+					u8 *text;
+
+					if (console < bus->ci->rambase ||
+					    console > end - 20)
+						goto diagnostic_done;
+					diagnostic_ret = brcmf_sdiod_ramrw(
+						sdiod, false, console + 8,
+						(u8 *)log, sizeof(log));
+					start = le32_to_cpu(log[0]);
+					size = le32_to_cpu(log[1]);
+					index = le32_to_cpu(log[2]);
+					brcmf_err(
+						"boot diagnostic: console read=%d buffer=%08x size=%u index=%u\n",
+						diagnostic_ret, start, size,
+						index);
+					if (diagnostic_ret || !size ||
+					    size > 8192 || index > size ||
+					    start < bus->ci->rambase ||
+					    start > end - size)
+						goto diagnostic_done;
+					text = kmalloc(size + 1, GFP_KERNEL);
+					if (!text)
+						goto diagnostic_done;
+					diagnostic_ret = brcmf_sdiod_ramrw(
+						sdiod, false, start, text,
+						size);
+					if (!diagnostic_ret) {
+						for (offset = 0; offset < size;
+						     offset++)
+							if ((text[offset] <
+								     32 &&
+							     text[offset] !=
+								     '\n' &&
+							     text[offset] !=
+								     '\t') ||
+							    text[offset] > 126)
+								text[offset] =
+									'.';
+						text[size] = 0;
+						for (offset = 0; offset < index;
+						     offset += 256)
+							brcmf_err(
+								"boot console [%u]: %.*s\n",
+								offset,
+								(int)min_t(
+									u32,
+									256,
+									index - offset),
+								text + offset);
+					}
+					kfree(text);
+				}
+diagnostic_done:;
+			}
+		}
+#endif
 		goto release;
+	}
 
 	/* Force clocks on backplane to be sure F2 interrupt propagates */
 	saveclk = brcmf_sdiod_readb(sdiod, SBSDIO_FUNC1_CHIPCLKCSR, &err);
