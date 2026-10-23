@@ -741,6 +741,12 @@ static int rkcif_mipi_start_streaming(struct rkcif_stream *stream)
 	if (match_data->mipi_ctrl0)
 		ctrl0 = match_data->mipi_ctrl0(stream, active_out_fmt);
 
+	/* RK3568 RAW8 DMA counts packed YUV422 crop width in bytes. */
+	if (match_data == &rkcif_rk3568_vicap_mipi_match_data &&
+	    active_out_fmt->mipi.type == RKCIF_MIPI_TYPE_RAW8 &&
+	    active_out_fmt->mipi.dt == MIPI_CSI2_DT_YUV422_8B)
+		width *= 2;
+
 	ctrl1 = RKCIF_XY_COORD(width, height);
 
 	int_mask |= RKCIF_MIPI_INT_FRAME0_END(stream->id);
