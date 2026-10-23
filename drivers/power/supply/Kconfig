@@ -1203,3 +1203,12 @@ config MACSMC_POWER
 	  Say Y or M here if you have an Apple Silicon based Mac.
 
 endif # POWER_SUPPLY
+
+config CHARGER_BEAM_SC89601
+	tristate "Beam Southchip SC89601D charger"
+	depends on I2C && REGULATOR
+	select REGMAP_I2C
+
+config BATTERY_BEAM_RK809
+	tristate "Beam read-only RK809 gauge"
+	depends on I2C && MFD_RK8XX_I2C && OF

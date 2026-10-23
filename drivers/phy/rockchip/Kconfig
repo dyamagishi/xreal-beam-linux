@@ -144,3 +144,9 @@ config PHY_ROCKCHIP_USBDP
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called phy-rockchip-usbdp
+
+config PHY_ROCKCHIP_NANENG_EDP
+	tristate "Rockchip RK3568 Naneng eDP PHY"
+	depends on ARCH_ROCKCHIP && OF
+	select GENERIC_PHY
+	select MFD_SYSCON

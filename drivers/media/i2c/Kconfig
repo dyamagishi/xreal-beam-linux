@@ -1814,3 +1814,10 @@ config VIDEO_MAX96717
 endmenu
 
 endif # VIDEO_DEV
+
+config VIDEO_BEAM_LT7911UXC
+	tristate "Beam LT7911UXC DP-to-CSI bridge"
+	depends on I2C && VIDEO_DEV && TYPEC
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE

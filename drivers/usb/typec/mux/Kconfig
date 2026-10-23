@@ -96,3 +96,7 @@ config TYPEC_MUX_WCD939X_USBSS
 	  If compiled as a module, the module will be named wcd939x-usbss.
 
 endmenu
+
+config TYPEC_MUX_BEAM_HD3SS460
+	tristate "XREAL Beam HD3SS460 GPIO mux"
+	depends on OF && GPIOLIB
