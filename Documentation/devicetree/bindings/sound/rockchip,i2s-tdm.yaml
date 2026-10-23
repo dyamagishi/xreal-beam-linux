@@ -75,16 +75,17 @@ properties:
 
   resets:
     minItems: 1
-    maxItems: 2
-    description: resets for the tx and rx directions
+    maxItems: 3
+    description: TX/RX master clock resets and optional HCLK domain reset
 
   reset-names:
     minItems: 1
-    maxItems: 2
+    maxItems: 3
     items:
       enum:
         - tx-m
         - rx-m
+        - h
 
   port:
     $ref: audio-graph-port.yaml#

@@ -57,6 +57,8 @@ struct rk_i2s_tdm_dev {
 	struct snd_dmaengine_dai_dma_data playback_dma_data;
 	struct reset_control *tx_reset;
 	struct reset_control *rx_reset;
+	struct reset_control *hclk_reset;
+	bool needs_hclk_reset;
 	const struct rk_i2s_soc_data *soc_data;
 	bool is_master_mode;
 	bool io_multiplex;
@@ -273,6 +275,12 @@ static void rockchip_snd_xfer_clear(struct rk_i2s_tdm_dev *i2s_tdm,
 					break;
 				}
 			}
+			/* Capture-only controllers may need their HCLK domain reset.
+			 * Defer regcache replay to the next sleepable PCM prepare.
+			 */
+			if (i2s_tdm->hclk_reset && !i2s_tdm->has_playback &&
+			    !i2s_tdm->is_master_mode && i2s_tdm->clk_trcm)
+				WRITE_ONCE(i2s_tdm->needs_hclk_reset, true);
 			dev_warn(i2s_tdm->dev, "clear failed, reset %s%s\n",
 				 tx ? "tx" : "", rx ? "rx" : "");
 			if (rx && tx)
@@ -778,6 +786,44 @@ static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 	return rockchip_i2s_io_multiplex(substream, dai);
 }
 
+/* A stopped external clock can leave CLR asserted across MCLK resets.
+ * HCLK reset clears that request. Keep it out of the atomic STOP trigger,
+ * and replay the cached format/clock/DMA configuration before START.
+ */
+static int rockchip_i2s_tdm_prepare(struct snd_pcm_substream *substream,
+				  struct snd_soc_dai *dai)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = to_info(dai);
+	unsigned int pending;
+	int ret;
+
+	if (!READ_ONCE(i2s_tdm->needs_hclk_reset))
+		return 0;
+	if (i2s_tdm->refcount)
+		return -EBUSY;
+	ret = reset_control_assert(i2s_tdm->hclk_reset);
+	if (ret)
+		return ret;
+	udelay(10);
+	ret = reset_control_deassert(i2s_tdm->hclk_reset);
+	if (ret)
+		return ret;
+	udelay(10);
+	rockchip_snd_xfer_sync_reset(i2s_tdm);
+	regcache_mark_dirty(i2s_tdm->regmap);
+	ret = regcache_sync(i2s_tdm->regmap);
+	if (ret)
+		return ret;
+	ret = regmap_read(i2s_tdm->regmap, I2S_CLR, &pending);
+	if (ret)
+		return ret;
+	if (pending)
+		return -EIO;
+	WRITE_ONCE(i2s_tdm->needs_hclk_reset, false);
+	dev_info(i2s_tdm->dev, "capture FIFO recovered with HCLK reset\n");
+	return 0;
+}
+
 static int rockchip_i2s_tdm_trigger(struct snd_pcm_substream *substream,
 				    int cmd, struct snd_soc_dai *dai)
 {
@@ -859,6 +905,7 @@ static int rockchip_i2s_tdm_set_bclk_ratio(struct snd_soc_dai *dai,
 static const struct snd_soc_dai_ops rockchip_i2s_tdm_dai_ops = {
 	.probe = rockchip_i2s_tdm_dai_probe,
 	.hw_params = rockchip_i2s_tdm_hw_params,
+	.prepare = rockchip_i2s_tdm_prepare,
 	.set_bclk_ratio	= rockchip_i2s_tdm_set_bclk_ratio,
 	.set_fmt = rockchip_i2s_tdm_set_fmt,
 	.set_sysclk = rockchip_i2s_tdm_set_sysclk,
@@ -1303,6 +1350,12 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->rx_reset),
 				     "Error in rx-m reset control\n");
 	}
+
+	i2s_tdm->hclk_reset = devm_reset_control_get_optional_exclusive(
+		&pdev->dev, "h");
+	if (IS_ERR(i2s_tdm->hclk_reset))
+		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->hclk_reset),
+				     "Error in h reset control\n");
 
 	i2s_tdm->hclk = devm_clk_get(&pdev->dev, "hclk");
 	if (IS_ERR(i2s_tdm->hclk)) {
