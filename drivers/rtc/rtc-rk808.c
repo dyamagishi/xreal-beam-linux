@@ -9,6 +9,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/kernel.h>
 #include <linux/rtc.h>
 #include <linux/bcd.h>
@@ -54,6 +55,7 @@ struct rk808_rtc {
 	struct rtc_device *rtc;
 	struct rk_rtc_compat_reg *creg;
 	int irq;
+	bool raw_calendar;
 };
 
 /*
@@ -136,7 +138,8 @@ static int rk808_rtc_readtime(struct device *dev, struct rtc_time *tm)
 	tm->tm_mon = (bcd2bin(rtc_data[4] & MONTHS_REG_MSK)) - 1;
 	tm->tm_year = (bcd2bin(rtc_data[5] & YEARS_REG_MSK)) + 100;
 	tm->tm_wday = bcd2bin(rtc_data[6] & WEEKS_REG_MSK);
-	rockchip_to_gregorian(tm);
+	if (!rk808_rtc->raw_calendar)
+		rockchip_to_gregorian(tm);
 	dev_dbg(dev, "RTC date/time %ptRd(%d) %ptRt\n", tm, tm->tm_wday, tm);
 
 	return ret;
@@ -150,7 +153,8 @@ static int rk808_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	int ret;
 
 	dev_dbg(dev, "set RTC date/time %ptRd(%d) %ptRt\n", tm, tm->tm_wday, tm);
-	gregorian_to_rockchip(tm);
+	if (!rk808_rtc->raw_calendar)
+		gregorian_to_rockchip(tm);
 	rtc_data[0] = bin2bcd(tm->tm_sec);
 	rtc_data[1] = bin2bcd(tm->tm_min);
 	rtc_data[2] = bin2bcd(tm->tm_hour);
@@ -206,7 +210,8 @@ static int rk808_rtc_readalarm(struct device *dev, struct rtc_wkalrm *alrm)
 	alrm->time.tm_mday = bcd2bin(alrm_data[3] & DAYS_REG_MSK);
 	alrm->time.tm_mon = (bcd2bin(alrm_data[4] & MONTHS_REG_MSK)) - 1;
 	alrm->time.tm_year = (bcd2bin(alrm_data[5] & YEARS_REG_MSK)) + 100;
-	rockchip_to_gregorian(&alrm->time);
+	if (!rk808_rtc->raw_calendar)
+		rockchip_to_gregorian(&alrm->time);
 
 	ret = regmap_read(rk808_rtc->regmap, rk808_rtc->creg->int_reg, &int_reg);
 	if (ret) {
@@ -257,7 +262,8 @@ static int rk808_rtc_setalarm(struct device *dev, struct rtc_wkalrm *alrm)
 	dev_dbg(dev, "alrm set RTC date/time %ptRd(%d) %ptRt\n",
 		&alrm->time, alrm->time.tm_wday, &alrm->time);
 
-	gregorian_to_rockchip(&alrm->time);
+	if (!rk808_rtc->raw_calendar)
+		gregorian_to_rockchip(&alrm->time);
 	alrm_data[0] = bin2bcd(alrm->time.tm_sec);
 	alrm_data[1] = bin2bcd(alrm->time.tm_min);
 	alrm_data[2] = bin2bcd(alrm->time.tm_hour);
@@ -384,6 +390,13 @@ static int rk808_rtc_probe(struct platform_device *pdev)
 	rk808_rtc = devm_kzalloc(&pdev->dev, sizeof(*rk808_rtc), GFP_KERNEL);
 	if (rk808_rtc == NULL)
 		return -ENOMEM;
+
+	/* Beam firmware and its recovery kernel store raw calendar dates.
+	 * Applying the upstream 2016 anchor adds ten days in 2026. Keep
+	 * time/alarm reads and writes compatible with those shared users.
+	 */
+	rk808_rtc->raw_calendar = rk808->variant == RK809_ID &&
+		of_machine_is_compatible("xreal,beam");
 
 	switch (rk808->variant) {
 	case RK809_ID:
