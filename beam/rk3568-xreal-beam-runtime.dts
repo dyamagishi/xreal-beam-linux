@@ -626,7 +626,7 @@
 	status = "okay";
 	bluetooth {
 		compatible = "brcm,bcm43438-bt";
-		/* 現行patchramのBD_ADDRを保持し、既存bondの識別子を変えない。 */
+		/* 個体のBD_ADDRはprepare-unit-dtb.pyで反映する。共有DTには固定しない。 */
 		clocks = <&rk809 RK808_CLKOUT1>;
 		clock-names = "lpo";
 		shutdown-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>;
