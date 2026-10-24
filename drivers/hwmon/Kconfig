@@ -25,6 +25,13 @@ menuconfig HWMON
 
 if HWMON
 
+config SENSORS_BEAM_NTC
+	tristate "XREAL Beam multiplexed NTC sensors"
+	depends on OF && GPIOLIB && IIO && THERMAL_OF
+	help
+	  Monitor the four external thermistors and compensated ambient
+	  temperature on the first-generation XREAL Beam.
+
 config HWMON_VID
 	tristate
 

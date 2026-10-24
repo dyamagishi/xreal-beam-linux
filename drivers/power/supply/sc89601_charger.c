@@ -12,6 +12,7 @@
 #include <linux/regmap.h>
 #include <linux/regulator/driver.h>
 #include <linux/types.h>
+#include <linux/thermal.h>
 
 /* Module parameters. */
 static int debug;
@@ -92,6 +93,10 @@ struct sc89601_device {
 	struct delayed_work charger_phandle_work;
 	struct notifier_block nb;
 	int vbus_flag;
+	struct thermal_cooling_device *cooling;
+	unsigned long cooling_state;
+	u32 thermal_current[5];
+	bool charge_requested;
 };
 
 static const struct regmap_range sc89601_readonly_reg_ranges[] = {
@@ -106,7 +111,7 @@ static const struct regmap_access_table sc89601_writeable_regs = {
 static const struct regmap_range sc89601_volatile_reg_ranges[] = {
 	regmap_reg_range(0x00, 0x00),
 	regmap_reg_range(0x02, 0x02),
-	regmap_reg_range(0x08, 0x09),
+	regmap_reg_range(0x08, 0x0a),
 	regmap_reg_range(0x0b, 0x0b),
 	regmap_reg_range(0x0c, 0x0c),
 	regmap_reg_range(0x0d, 0x14),
@@ -463,7 +468,13 @@ static int sc89601_power_supply_get_property(struct power_supply *psy,
 		break;
 
 	case POWER_SUPPLY_PROP_ONLINE:
-		val->intval = !!state.chrg_status;
+		val->intval = !!state.online;
+		break;
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		ret = sc89601_field_read(sc89601, F_ICC);
+		if (ret < 0)
+			return ret;
+		val->intval = sc89601_find_val(ret, TBL_ICHG);
 		break;
 
 	case POWER_SUPPLY_PROP_HEALTH:
@@ -537,6 +548,63 @@ static int sc89601_disable_charger(struct sc89601_device *sc89601)
 	return sc89601_field_write(sc89601, F_CHG_CFG, 0);
 }
 
+static int sc89601_apply_cooling(struct sc89601_device *sc)
+{
+	u32 charge_ua = sc->thermal_current[sc->cooling_state];
+	int ret;
+
+	/* Stop charging before changing the current limit. Voltage is untouched. */
+	ret = sc89601_disable_charger(sc);
+	if (ret || !charge_ua || !sc->charge_requested)
+		return ret;
+	ret = sc89601_field_write(sc, F_ICC, sc89601_find_idx(charge_ua, TBL_ICHG));
+	if (ret)
+		return ret;
+	return sc89601_enable_charger(sc);
+}
+
+static int sc89601_cooling_max(struct thermal_cooling_device *cdev, unsigned long *state)
+{
+	*state = 4;
+	return 0;
+}
+
+static int sc89601_cooling_get(struct thermal_cooling_device *cdev, unsigned long *state)
+{
+	struct sc89601_device *sc = cdev->devdata;
+
+	*state = READ_ONCE(sc->cooling_state);
+	return 0;
+}
+
+static int sc89601_cooling_set(struct thermal_cooling_device *cdev, unsigned long state)
+{
+	struct sc89601_device *sc = cdev->devdata;
+	unsigned long before;
+	int ret = 0;
+
+	if (state > 4)
+		return -EINVAL;
+	mutex_lock(&sc->lock);
+	before = sc->cooling_state;
+	if (before != state) {
+		sc->cooling_state = state;
+		ret = sc89601_apply_cooling(sc);
+		if (ret)
+			sc->cooling_state = before;
+	}
+	mutex_unlock(&sc->lock);
+	if (!ret && before != state)
+		power_supply_changed(sc->charger);
+	return ret;
+}
+
+static const struct thermal_cooling_device_ops sc89601_cooling_ops = {
+	.get_max_state = sc89601_cooling_max,
+	.get_cur_state = sc89601_cooling_get,
+	.set_cur_state = sc89601_cooling_set,
+};
+
 static int sc89601_power_supply_set_property(struct power_supply *psy,
 					     enum power_supply_property psp,
 					     const union power_supply_propval *val)
@@ -544,10 +612,14 @@ static int sc89601_power_supply_set_property(struct power_supply *psy,
 	struct sc89601_device *sc89601 = power_supply_get_drvdata(psy);
 	int index, ret = 0;
 
+	mutex_lock(&sc89601->lock);
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
 		DBG("POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX\n");
-		index = sc89601_find_idx(val->intval, TBL_ICHG);
+		index = sc89601_find_idx(sc89601->cooling ?
+			min_t(u32, max(val->intval, 0),
+			      sc89601->thermal_current[sc89601->cooling_state]) :
+			max(val->intval, 0), TBL_ICHG);
 		ret = sc89601_field_write(sc89601, F_ICC, index);
 		if (ret < 0)
 			dev_err(sc89601->dev, "set input voltage limit failed\n");
@@ -573,6 +645,11 @@ static int sc89601_power_supply_set_property(struct power_supply *psy,
 		break;
 
 	case POWER_SUPPLY_PROP_ONLINE:
+		sc89601->charge_requested = !!val->intval;
+		if (sc89601->cooling) {
+			ret = sc89601_apply_cooling(sc89601);
+			break;
+		}
 		if (val->intval) {
 			DBG("POWER_SUPPLY_PROP_ONLINE\n");
 			ret = sc89601_enable_charger(sc89601);
@@ -588,6 +665,7 @@ static int sc89601_power_supply_set_property(struct power_supply *psy,
 		ret = -EINVAL;
 	}
 
+	mutex_unlock(&sc89601->lock);
 	return ret;
 }
 
@@ -682,6 +760,7 @@ static int sc89601_hw_init(struct sc89601_device *sc89601)
 }
 
 static const enum power_supply_property sc89601_power_supply_props[] = {
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_MANUFACTURER,
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_STATUS,
@@ -1081,6 +1160,26 @@ static int sc89601_probe(struct i2c_client *client)
 	if (ret < 0) {
 		dev_err(dev, "Cannot initialize the chip.\n");
 		return ret;
+	}
+	sc89601->charge_requested = true;
+	if (device_property_present(dev, "#cooling-cells")) {
+		u32 limit = sc89601_find_val(sc89601->init_data.ichg, TBL_ICHG);
+		int i;
+
+		ret = device_property_read_u32_array(dev, "sc,thermal-charge-current-microamp",
+						    &sc89601->thermal_current[1], 4);
+		if (ret)
+			return dev_err_probe(dev, ret, "thermal charge limits\n");
+		sc89601->thermal_current[0] = limit;
+		for (i = 1; i < 5; i++)
+			sc89601->thermal_current[i] = min(sc89601->thermal_current[i],
+							 sc89601->thermal_current[i - 1]);
+		if (sc89601->thermal_current[4])
+			return -EINVAL;
+		sc89601->cooling = devm_thermal_of_cooling_device_register(dev, 0,
+						"beam-charge", sc89601, &sc89601_cooling_ops);
+		if (IS_ERR(sc89601->cooling))
+			return dev_err_probe(dev, PTR_ERR(sc89601->cooling), "charge cooling\n");
 	}
 
 	sc89601->nb.notifier_call = sc89601_pd_notifier_call;

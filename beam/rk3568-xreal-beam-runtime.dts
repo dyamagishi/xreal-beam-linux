@@ -85,6 +85,8 @@
 	};
 	vdd_3v3_fan: regulator-fan {
 		compatible = "regulator-fixed";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fan_enable>;
 		regulator-name = "vdd_3v3_fan";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
@@ -107,10 +109,16 @@
 	};
 	pwm_fan: pwm-fan {
 		compatible = "pwm-fan";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fan_tach>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <RK_PD3 IRQ_TYPE_EDGE_FALLING>;
+		/* hwmon標準の2 pulse/rev換算。絶対回転数の機械的較正は別途必要。 */
+		pulses-per-revolution = <2>;
 		pwms = <&pwm0 0 40000 0>;
 		fan-supply = <&vdd_3v3_fan>;
-		/* 初回運用は停止せず、温度上昇に応じて増速する。 */
-		cooling-levels = <100 150 200 255>;
+		/* CPUと外部NTCの冷却要求の最大値をthermal coreが適用する。 */
+		cooling-levels = <0 140 160 190 255>;
 		#cooling-cells = <2>;
 	};
 	sdio_pwrseq: sdio-pwrseq {
@@ -119,7 +127,7 @@
 		clock-names = "ext_clock";
 		/* PMICのenableに加えてSoC側の外部LPO出力ピンも必要。 */
 		pinctrl-names = "default";
-		pinctrl-0 = <&clk32k_out1>;
+		pinctrl-0 = <&clk32k_out1 &wifi_reset>;
 		reset-gpios = <&gpio2 RK_PB1 GPIO_ACTIVE_LOW>;
 		post-power-on-delay-ms = <200>;
 	};
@@ -142,8 +150,83 @@
 		sense-resistor-micro-ohms = <10000>;
 	};
 
+	beam_ntc: ntc-sensors {
+		compatible = "xreal,beam-ntc";
+		pinctrl-names = "default";
+		pinctrl-0 = <&ntc_controls>;
+		enable-gpios = <&gpio1 RK_PD0 GPIO_ACTIVE_HIGH>;
+		select-a-gpios = <&gpio1 RK_PD1 GPIO_ACTIVE_HIGH>;
+		select-b-gpios = <&gpio1 RK_PD2 GPIO_ACTIVE_HIGH>;
+		io-channels = <&saradc 1>;
+		io-channel-names = "ntc";
+		#thermal-sensor-cells = <1>;
+	};
+	thermal-zones {
+		beam-outside {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&beam_ntc 4>;
+			trips {
+				outside_35: fan-35 { temperature = <35000>; hysteresis = <2000>; type = "active"; };
+				outside_40: fan-40 { temperature = <40000>; hysteresis = <2000>; type = "active"; };
+				outside_45: fan-45 { temperature = <45000>; hysteresis = <2000>; type = "active"; };
+				outside_50: fan-50 { temperature = <50000>; hysteresis = <2000>; type = "active"; };
+				charge_42: charge-42 { temperature = <42000>; hysteresis = <0>; type = "active"; };
+				charge_47: charge-47 { temperature = <47000>; hysteresis = <0>; type = "active"; };
+			};
+			cooling-maps {
+				fan35 { trip = <&outside_35>; cooling-device = <&pwm_fan 1 1>; };
+				fan40 { trip = <&outside_40>; cooling-device = <&pwm_fan 2 2>; };
+				fan45 { trip = <&outside_45>; cooling-device = <&pwm_fan 3 3>; };
+				fan50 { trip = <&outside_50>; cooling-device = <&pwm_fan 4 4>; };
+				charge42 { trip = <&charge_42>; cooling-device = <&sc89601 1 1>; };
+				charge45 { trip = <&outside_45>; cooling-device = <&sc89601 2 2>; };
+				charge47 { trip = <&charge_47>; cooling-device = <&sc89601 3 3>; };
+				charge50 { trip = <&outside_50>; cooling-device = <&sc89601 4 4>; };
+			};
+		};
+		beam-battery {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&beam_ntc 3>;
+			trips {
+				battery_warm: warm { temperature = <45000>; hysteresis = <1000>; type = "active"; };
+				battery_hot: hot { temperature = <54000>; hysteresis = <1000>; type = "active"; };
+				critical { temperature = <67000>; hysteresis = <0>; type = "critical"; };
+			};
+			cooling-maps {
+				warm { trip = <&battery_warm>; cooling-device = <&sc89601 2 2>; };
+				hot { trip = <&battery_hot>; cooling-device = <&sc89601 4 4>; };
+			};
+		};
+		beam-battery-cold {
+			/* 温度の符号を反転し、低温時にも通常のthermal判定を使う。 */
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&beam_ntc 5>;
+			trips {
+				battery_cool: cool { temperature = <(-15000)>; hysteresis = <1000>; type = "active"; };
+				battery_cold: cold { temperature = <0>; hysteresis = <0>; type = "active"; };
+			};
+			cooling-maps {
+				cool { trip = <&battery_cool>; cooling-device = <&sc89601 2 2>; };
+				cold { trip = <&battery_cold>; cooling-device = <&sc89601 4 4>; };
+			};
+		};
+		beam-board {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&beam_ntc 0>;
+			trips {
+				critical { temperature = <80000>; hysteresis = <0>; type = "critical"; };
+			};
+		};
+	};
+
 	vbus_source: regulator-vbus-source {
 		compatible = "regulator-fixed";
+		pinctrl-names = "default";
+		pinctrl-0 = <&vbus_enable>;
 		regulator-name = "vbus5v0_otg";
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
@@ -174,6 +257,8 @@
 
 	dp_source_mux: typec-dp-source-mux {
 		compatible = "xreal,beam-hd3ss460";
+		pinctrl-names = "default";
+		pinctrl-0 = <&dp_source_controls>;
 		orientation-switch;
 		mode-switch;
 		enable-gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_HIGH>;
@@ -189,6 +274,8 @@
 	};
 	dp_sink_mux: typec-dp-sink-mux {
 		compatible = "xreal,beam-hd3ss460";
+		pinctrl-names = "default";
+		pinctrl-0 = <&dp_sink_controls>;
 		orientation-switch;
 		mode-switch;
 		enable-gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
@@ -278,6 +365,8 @@
 	sc89601: charger@6b {
 		compatible = "sc,sc89601d-charger";
 		reg = <0x6b>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&charger_int>;
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PC1 IRQ_TYPE_EDGE_FALLING>;
 		/* TCPMのpower_supplyはconnectorではなくI2Cデバイスをfwnodeにする。 */
@@ -289,12 +378,15 @@
 		sc,minimum-sys-voltage = <3500000>;
 		sc,boost-voltage = <5000000>;
 		sc,boost-max-current = <1200000>;
+		#cooling-cells = <2>;
+		/* 温度上限は通常の充電電流設定より増やさず、末尾は停止。 */
+		sc,thermal-charge-current-microamp = <2100000 900000 480000 0>;
 	};
 	aw_input: typec@22 {
 		compatible = "awinic,aw35615";
 		reg = <0x22>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&aw_input_int>;
+		pinctrl-0 = <&aw_input_int &charge_enable>;
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PC3 IRQ_TYPE_LEVEL_LOW>;
 		vbus-supply = <&vbus_source>;
@@ -335,7 +427,7 @@
 		compatible = "awinic,aw35615";
 		reg = <0x22>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&aw_output_int>;
+		pinctrl-0 = <&aw_output_int &output_i2c_route>;
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_LOW>;
 		vbus-supply = <&vbus_source>;
@@ -431,7 +523,7 @@
 	cooling-maps {
 		fan-map {
 			trip = <&fan_trip>;
-			cooling-device = <&pwm_fan 0 3>;
+			cooling-device = <&pwm_fan 0 4>;
 		};
 	};
 };
@@ -583,6 +675,51 @@
 };
 
 &pinctrl {
+	/* ユーザー空間で所有するLED resetのmux/biasだけを設定する。 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&led_reset>;
+	board-controls {
+		ntc_controls: ntc-controls {
+			rockchip,pins = <1 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <1 RK_PD1 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <1 RK_PD2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		charger_int: charger-int {
+			rockchip,pins = <0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+		charge_enable: charge-enable {
+			rockchip,pins = <0 RK_PD5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		output_i2c_route: output-i2c-route {
+			rockchip,pins = <1 RK_PD7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		vbus_enable: vbus-enable {
+			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		fan_enable: fan-enable {
+			rockchip,pins = <4 RK_PC6 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+		wifi_reset: wifi-reset {
+			rockchip,pins = <2 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		fan_tach: fan-tach {
+			rockchip,pins = <1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+		led_reset: led-reset {
+			rockchip,pins = <0 RK_PA6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		dp_source_controls: dp-source-controls {
+			rockchip,pins = <0 RK_PB5 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <0 RK_PB6 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <0 RK_PC0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+		dp_sink_controls: dp-sink-controls {
+			rockchip,pins = <1 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <1 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <1 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
 	usb-c {
 		/* AW35615のactive-low割り込み線を非アサート時にHighへ保つ。 */
 		aw_input_int: aw-input-int {
